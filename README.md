@@ -10,7 +10,7 @@ See the `example` directory for a simple example of how to use the library. The 
 
 ## Features
 
-### Game Loop Manager &amp; Metrics
+### Game Loop Manager & Metrics
 
 ### Vector Math
 
@@ -18,6 +18,6 @@ See the `example` directory for a simple example of how to use the library. The 
 
 ### Collision Detection (Hierarchical Spatial Hash Grid)
 
-### Polygon Collision Detection/Resolution (Convex &amp; Concave)
+### Polygon Collision Detection/Resolution (Convex & Concave)
 
-### Client Interpolation &amp; Metrics
+### Client Interpolation & Metrics

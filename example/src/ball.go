@@ -21,7 +21,7 @@ func NewBall(g *Game) (b *Ball) {
 	return
 }
 
-func (b *Ball) GetAABB() (aabb *hshg.AABB[float64]) {
+func (b *Ball) GetAABB() (aabb *hshg.AABB2[float64]) {
 	aabb = b.AABB
 	return
 }

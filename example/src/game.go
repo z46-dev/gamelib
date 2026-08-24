@@ -15,7 +15,7 @@ const (
 func NewGame() (g *Game) {
 	g = &Game{
 		Balls:       gamelib.NewCollection[*Ball](),
-		SpatialHash: hshg.NewSpatialHash[*Ball](),
+		SpatialHash: hshg.NewSpatialHash2[*Ball](),
 	}
 
 	return

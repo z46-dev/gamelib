@@ -8,19 +8,12 @@ import (
 	"golang.org/x/exp/constraints"
 )
 
-type PolygonXYPoint[T constraints.Float] struct {
-	x, y T
-}
-
-type Polygon[T constraints.Float] struct {
-	numPoints              int
-	Reference, Points      []*vector.Vec2[T]
-	x, y, radius, rotation T
-	AABB                   *hshg.AABB[T]
-	parts                  []*Polygon[T]
-}
-
+// NewPolygon creates a polygon from local-space points and applies its initial transform.
 func NewPolygon[T constraints.Float](points []*vector.Vec2[T], position *vector.Vec2[T], radius, rotation T) (p *Polygon[T]) {
+	if len(points) < 3 {
+		panic("poly: polygon requires at least three points")
+	}
+
 	p = &Polygon[T]{
 		numPoints: len(points),
 		Reference: make([]*vector.Vec2[T], len(points)),
@@ -29,7 +22,8 @@ func NewPolygon[T constraints.Float](points []*vector.Vec2[T], position *vector.
 		y:         0,
 		radius:    0,
 		rotation:  0,
-		AABB:      &hshg.AABB[T]{},
+		AABB:      &hshg.AABB2[T]{},
+		axes:      make([]vector.Vec2[T], len(points)),
 	}
 
 	for i := range points {
@@ -39,14 +33,18 @@ func NewPolygon[T constraints.Float](points []*vector.Vec2[T], position *vector.
 
 	if !isConvexPolygon(points) {
 		p.parts = buildConvexParts(points)
+		if len(p.parts) == 0 {
+			panic("poly: polygon could not be decomposed into convex parts")
+		}
 	}
 
 	p.Transform(position, radius, rotation)
 	return
 }
 
+// Transform updates the polygon's world-space points, convex parts, and bounds.
 func (p *Polygon[T]) Transform(position *vector.Vec2[T], radius, rotation T) {
-	if p.x == position.X && p.y == position.Y && p.radius == radius && p.rotation == rotation {
+	if p.transformed && p.x == position.X && p.y == position.Y && p.radius == radius && p.rotation == rotation {
 		return
 	}
 
@@ -65,28 +63,45 @@ func (p *Polygon[T]) Transform(position *vector.Vec2[T], radius, rotation T) {
 	}
 
 	p.x, p.y, p.radius, p.rotation = position.X, position.Y, radius, rotation
+	p.transformed = true
 	p.updateAABB()
 }
 
+// updateAABB refreshes the polygon's bounds and normalized separating axes.
 func (p *Polygon[T]) updateAABB() {
 	var minX, minY, maxX, maxY T = T(math.Inf(1)), T(math.Inf(1)), T(math.Inf(-1)), T(math.Inf(-1))
 
 	for i := range p.numPoints {
-		minX = min(minX, p.Points[i].X)
-		minY = min(minY, p.Points[i].Y)
-		maxX = max(maxX, p.Points[i].X)
-		maxY = max(maxY, p.Points[i].Y)
+		var (
+			point  *vector.Vec2[T] = p.Points[i]
+			next   *vector.Vec2[T] = p.Points[(i+1)%p.numPoints]
+			axisX  T               = -(next.Y - point.Y)
+			axisY  T               = next.X - point.X
+			length T               = T(math.Hypot(float64(axisX), float64(axisY)))
+		)
+
+		minX = min(minX, point.X)
+		minY = min(minY, point.Y)
+		maxX = max(maxX, point.X)
+		maxY = max(maxY, point.Y)
+		if length == 0 {
+			p.axes[i].X, p.axes[i].Y = 0, 0
+		} else {
+			p.axes[i].X, p.axes[i].Y = axisX/length, axisY/length
+		}
 	}
 
 	p.AABB.X1, p.AABB.Y1, p.AABB.X2, p.AABB.Y2 = minX, minY, maxX, maxY
 }
 
+// makePolygonFromPoints builds an internal convex polygon from local-space points.
 func makePolygonFromPoints[T constraints.Float](points []*vector.Vec2[T]) (p *Polygon[T]) {
 	p = &Polygon[T]{
 		numPoints: len(points),
 		Reference: make([]*vector.Vec2[T], len(points)),
 		Points:    make([]*vector.Vec2[T], len(points)),
-		AABB:      &hshg.AABB[T]{},
+		AABB:      &hshg.AABB2[T]{},
+		axes:      make([]vector.Vec2[T], len(points)),
 	}
 
 	for i := range points {
@@ -98,6 +113,7 @@ func makePolygonFromPoints[T constraints.Float](points []*vector.Vec2[T]) (p *Po
 	return
 }
 
+// polygonArea returns the signed area used to determine vertex winding.
 func polygonArea[T constraints.Float](points []*vector.Vec2[T]) (area T) {
 	for i := range points {
 		var j int = (i + 1) % len(points)
@@ -108,6 +124,7 @@ func polygonArea[T constraints.Float](points []*vector.Vec2[T]) (area T) {
 	return
 }
 
+// isConvexPolygon reports whether all nondegenerate turns use the same winding.
 func isConvexPolygon[T constraints.Float](points []*vector.Vec2[T]) (convex bool) {
 	if len(points) < 4 {
 		convex = true
@@ -143,6 +160,7 @@ func isConvexPolygon[T constraints.Float](points []*vector.Vec2[T]) (convex bool
 	return
 }
 
+// pointInTriangle reports whether a point lies inside or on a consistently wound triangle.
 func pointInTriangle[T constraints.Float](point, a, b, c *vector.Vec2[T], ccw bool) (inside bool) {
 	var (
 		eps T = 1e-9
@@ -160,6 +178,7 @@ func pointInTriangle[T constraints.Float](point, a, b, c *vector.Vec2[T], ccw bo
 	return
 }
 
+// buildConvexParts decomposes a simple concave polygon into triangles using ear clipping.
 func buildConvexParts[T constraints.Float](points []*vector.Vec2[T]) (parts []*Polygon[T]) {
 	if len(points) < 4 || isConvexPolygon(points) {
 		return []*Polygon[T]{makePolygonFromPoints(points)}
@@ -234,13 +253,10 @@ func buildConvexParts[T constraints.Float](points []*vector.Vec2[T]) (parts []*P
 		}))
 	}
 
-	if len(parts) == 0 {
-		return []*Polygon[T]{makePolygonFromPoints(points)}
-	}
-
 	return parts
 }
 
+// PointIsInside reports whether a point lies inside the polygon using an even-odd crossing test.
 func (p *Polygon[T]) PointIsInside(point *vector.Vec2[T]) (inside bool) {
 	var x1, y1 T = p.Points[p.numPoints-1].X, p.Points[p.numPoints-1].Y
 
@@ -257,18 +273,26 @@ func (p *Polygon[T]) PointIsInside(point *vector.Vec2[T]) (inside bool) {
 	return
 }
 
+// CircleIntersectsEdge reports whether a circle overlaps a line segment from the polygon.
 func (p *Polygon[T]) CircleIntersectsEdge(p1, p2 *vector.Vec2[T], circlePoint *vector.Vec2[T], circleRadius T) (intersects bool) {
 	var (
-		ABx, ABy T = p2.X - p1.X, p2.Y - p1.Y
-		ACx, ACy T = circlePoint.X - p1.X, circlePoint.Y - p1.Y
-		t        T = max(0, min(1, (ABx*ACx+ABy*ACy)/(ABx*ABx+ABy*ABy)))
-		dx, dy   T = (p1.X + ABx*t) - circlePoint.X, (p1.Y + ABy*t) - circlePoint.Y
+		ABx, ABy      T = p2.X - p1.X, p2.Y - p1.Y
+		ACx, ACy      T = circlePoint.X - p1.X, circlePoint.Y - p1.Y
+		squaredLength T = ABx*ABx + ABy*ABy
+		t             T
 	)
+
+	if squaredLength != 0 {
+		t = max(0, min(1, (ABx*ACx+ABy*ACy)/squaredLength))
+	}
+
+	var dx, dy T = (p1.X + ABx*t) - circlePoint.X, (p1.Y + ABy*t) - circlePoint.Y
 
 	intersects = (dx*dx + dy*dy) < (circleRadius * circleRadius)
 	return
 }
 
+// CircleIntersects reports whether a circle overlaps the polygon interior or any edge.
 func (p *Polygon[T]) CircleIntersects(circlePoint *vector.Vec2[T], radius T) (intersects bool) {
 	if intersects = p.PointIsInside(circlePoint); intersects {
 		return
@@ -283,17 +307,24 @@ func (p *Polygon[T]) CircleIntersects(circlePoint *vector.Vec2[T], radius T) (in
 	return
 }
 
+// GetClosestPointOnEdge returns the closest point on segment p1-p2 to point p3.
 func (p *Polygon[T]) GetClosestPointOnEdge(p1, p2, p3 *vector.Vec2[T]) (point *vector.Vec2[T]) {
 	var (
-		ABx, ABy T = p2.X - p1.X, p2.Y - p1.Y
-		ACx, ACy T = p3.X - p1.X, p3.Y - p1.Y
-		t        T = max(0, min(1, (ABx*ACx+ABy*ACy)/(ABx*ABx+ABy*ABy)))
+		ABx, ABy      T = p2.X - p1.X, p2.Y - p1.Y
+		ACx, ACy      T = p3.X - p1.X, p3.Y - p1.Y
+		squaredLength T = ABx*ABx + ABy*ABy
+		t             T
 	)
+
+	if squaredLength != 0 {
+		t = max(0, min(1, (ABx*ACx+ABy*ACy)/squaredLength))
+	}
 
 	point = vector.NewVec2(p1.X+ABx*t, p1.Y+ABy*t)
 	return
 }
 
+// ProjectOnto projects all world-space vertices onto an axis.
 func (p *Polygon[T]) ProjectOnto(axis *vector.Vec2[T]) (minimum, maximum T) {
 	minimum, maximum = T(math.Inf(1)), T(math.Inf(-1))
 
@@ -305,6 +336,7 @@ func (p *Polygon[T]) ProjectOnto(axis *vector.Vec2[T]) (minimum, maximum T) {
 	return
 }
 
+// projectOntoAxis projects all world-space vertices onto scalar axis components.
 func (p *Polygon[T]) projectOntoAxis(axisX, axisY T) (minimum, maximum T) {
 	minimum, maximum = T(math.Inf(1)), T(math.Inf(-1))
 
@@ -316,29 +348,47 @@ func (p *Polygon[T]) projectOntoAxis(axisX, axisY T) (minimum, maximum T) {
 	return
 }
 
+// ResolveCirclePolygon returns a boundary-relative circle position and its outward direction.
 func ResolveCirclePolygon[T constraints.Float](circlePoint *vector.Vec2[T], circleRadius T, polygon *Polygon[T]) (point *vector.Vec2[T], angle T) {
 	var (
-		closestDistance T               = T(math.Inf(1))
-		closestPoint    *vector.Vec2[T] = nil
+		closestDistance    T = T(math.Inf(1))
+		closestX, closestY T
+		found              bool
 	)
 
 	for i := range polygon.numPoints {
 		var (
-			point *vector.Vec2[T] = polygon.GetClosestPointOnEdge(polygon.Points[i], polygon.Points[(i+1)%polygon.numPoints], circlePoint)
-			dist  T               = point.DistSquared(circlePoint)
+			start         *vector.Vec2[T] = polygon.Points[i]
+			end           *vector.Vec2[T] = polygon.Points[(i+1)%polygon.numPoints]
+			edgeX, edgeY  T               = end.X - start.X, end.Y - start.Y
+			toX, toY      T               = circlePoint.X - start.X, circlePoint.Y - start.Y
+			squaredLength T               = edgeX*edgeX + edgeY*edgeY
+			t             T
 		)
 
-		if dist < closestDistance {
-			closestDistance = dist
-			closestPoint = point
+		if squaredLength != 0 {
+			t = max(0, min(1, (edgeX*toX+edgeY*toY)/squaredLength))
+		}
+
+		var (
+			candidateX T = start.X + edgeX*t
+			candidateY T = start.Y + edgeY*t
+			dx, dy     T = candidateX - circlePoint.X, candidateY - circlePoint.Y
+			distance   T = dx*dx + dy*dy
+		)
+
+		if distance < closestDistance {
+			closestDistance = distance
+			closestX, closestY = candidateX, candidateY
+			found = true
 		}
 	}
 
-	if closestPoint == nil {
+	if !found {
 		return nil, 0
 	}
 
-	var normal *vector.Vec2[T] = circlePoint.Copy().Sub(closestPoint)
+	var normal *vector.Vec2[T] = vector.NewVec2(circlePoint.X-closestX, circlePoint.Y-closestY)
 	if normal.SquaredLength() == 0 {
 		normal = vector.NewVec2[T](1, 0)
 	} else {
@@ -349,12 +399,17 @@ func ResolveCirclePolygon[T constraints.Float](circlePoint *vector.Vec2[T], circ
 		normal.Mul(-1)
 	}
 
-	point = closestPoint.Copy().Add(normal.Mul(circleRadius))
-	angle = closestPoint.AngleTo(point)
+	point = vector.NewVec2(closestX, closestY).Add(normal.Mul(circleRadius))
+	angle = T(math.Atan2(float64(point.Y-closestY), float64(point.X-closestX)))
 	return
 }
 
+// TwoPolygonsIntersect reports whether two convex or decomposed concave polygons overlap.
 func TwoPolygonsIntersect[T constraints.Float](p1, p2 *Polygon[T]) (intersects bool) {
+	if !p1.AABB.Intersects(p2.AABB) {
+		return
+	}
+
 	var (
 		p1single [1]*Polygon[T]
 		p2single [1]*Polygon[T]
@@ -374,7 +429,7 @@ func TwoPolygonsIntersect[T constraints.Float](p1, p2 *Polygon[T]) (intersects b
 
 	for _, a := range parts1 {
 		for _, b := range parts2 {
-			if twoPolygonsIntersectConvex(a, b) {
+			if a.AABB.Intersects(b.AABB) && twoPolygonsIntersectConvex(a, b) {
 				return true
 			}
 		}
@@ -383,11 +438,17 @@ func TwoPolygonsIntersect[T constraints.Float](p1, p2 *Polygon[T]) (intersects b
 	return false
 }
 
+// twoPolygonsIntersectConvex applies SAT to a pair of convex polygons.
 func twoPolygonsIntersectConvex[T constraints.Float](p1, p2 *Polygon[T]) (intersects bool) {
 	return !polygonsSeparateOnAxes(p1, p2) && !polygonsSeparateOnAxes(p2, p1)
 }
 
+// ResolveTwoPolygons returns a separating translation for overlapping polygon parts.
 func ResolveTwoPolygons[T constraints.Float](p1, p2 *Polygon[T]) (resolution *vector.Vec2[T]) {
+	if !p1.AABB.Intersects(p2.AABB) {
+		return
+	}
+
 	var (
 		p1single  [1]*Polygon[T]
 		p2single  [1]*Polygon[T]
@@ -411,6 +472,10 @@ func ResolveTwoPolygons[T constraints.Float](p1, p2 *Polygon[T]) (resolution *ve
 
 	for _, a := range parts1 {
 		for _, b := range parts2 {
+			if !a.AABB.Intersects(b.AABB) {
+				continue
+			}
+
 			var mtv *vector.Vec2[T] = resolveTwoPolygonsConvex(a, b)
 			if mtv == nil {
 				continue
@@ -431,6 +496,7 @@ func ResolveTwoPolygons[T constraints.Float](p1, p2 *Polygon[T]) (resolution *ve
 	return bestMTV
 }
 
+// resolveTwoPolygonsConvex returns the minimum SAT translation for two convex polygons.
 func resolveTwoPolygonsConvex[T constraints.Float](p1, p2 *Polygon[T]) (resolution *vector.Vec2[T]) {
 	var (
 		mtv        *vector.Vec2[T] = nil
@@ -450,26 +516,17 @@ func resolveTwoPolygonsConvex[T constraints.Float](p1, p2 *Polygon[T]) (resoluti
 	return mtv
 }
 
+// polygonsSeparateOnAxes reports whether any cached source axis separates the polygons.
 func polygonsSeparateOnAxes[T constraints.Float](source, target *Polygon[T]) bool {
-	for i := range source.numPoints {
-		var (
-			x1, y1 T = source.Points[i].X, source.Points[i].Y
-			x2, y2 T = source.Points[(i+1)%source.numPoints].X, source.Points[(i+1)%source.numPoints].Y
-			axisX  T = -(y2 - y1)
-			axisY  T = x2 - x1
-			length T = T(math.Hypot(float64(axisX), float64(axisY)))
-		)
-
-		if length == 0 {
+	for i := range source.axes {
+		var axis *vector.Vec2[T] = &source.axes[i]
+		if axis.X == 0 && axis.Y == 0 {
 			continue
 		}
 
-		axisX /= length
-		axisY /= length
-
 		var (
-			min1, max1 T = source.projectOntoAxis(axisX, axisY)
-			min2, max2 T = target.projectOntoAxis(axisX, axisY)
+			min1, max1 T = source.projectOntoAxis(axis.X, axis.Y)
+			min2, max2 T = target.projectOntoAxis(axis.X, axis.Y)
 		)
 
 		if max1 < min2 || max2 < min1 {
@@ -480,26 +537,17 @@ func polygonsSeparateOnAxes[T constraints.Float](source, target *Polygon[T]) boo
 	return false
 }
 
+// updateMTVFromAxes tests cached axes and updates the smallest separating translation.
 func updateMTVFromAxes[T constraints.Float](source, target *Polygon[T], deltaX, deltaY, eps T, minOverlap *T, mtv **vector.Vec2[T]) bool {
-	for i := range source.numPoints {
-		var (
-			x1, y1 T = source.Points[i].X, source.Points[i].Y
-			x2, y2 T = source.Points[(i+1)%source.numPoints].X, source.Points[(i+1)%source.numPoints].Y
-			axisX  T = -(y2 - y1)
-			axisY  T = x2 - x1
-			length T = T(math.Hypot(float64(axisX), float64(axisY)))
-		)
-
-		if length == 0 {
+	for i := range source.axes {
+		var axis *vector.Vec2[T] = &source.axes[i]
+		if axis.X == 0 && axis.Y == 0 {
 			continue
 		}
 
-		axisX /= length
-		axisY /= length
-
 		var (
-			min1, max1 T = source.projectOntoAxis(axisX, axisY)
-			min2, max2 T = target.projectOntoAxis(axisX, axisY)
+			min1, max1 T = source.projectOntoAxis(axis.X, axis.Y)
+			min2, max2 T = target.projectOntoAxis(axis.X, axis.Y)
 			overlap    T = min(max1, max2) - max(min1, min2)
 		)
 
@@ -514,7 +562,7 @@ func updateMTVFromAxes[T constraints.Float](source, target *Polygon[T], deltaX, 
 		if overlap < *minOverlap {
 			*minOverlap = overlap
 			var flip T = 1
-			if deltaX*axisX+deltaY*axisY > 0 {
+			if deltaX*axis.X+deltaY*axis.Y > 0 {
 				flip = -1
 			}
 
@@ -522,14 +570,15 @@ func updateMTVFromAxes[T constraints.Float](source, target *Polygon[T], deltaX, 
 				*mtv = &vector.Vec2[T]{}
 			}
 
-			(*mtv).X = axisX * overlap * flip
-			(*mtv).Y = axisY * overlap * flip
+			(*mtv).X = axis.X * overlap * flip
+			(*mtv).Y = axis.Y * overlap * flip
 		}
 	}
 
 	return true
 }
 
+// LineIntersects reports whether a line segment crosses any polygon edge.
 func (p *Polygon[T]) LineIntersects(p1, p2 *vector.Vec2[T]) (intersects bool) {
 	for i := range p.numPoints {
 		var (

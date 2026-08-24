@@ -12,7 +12,7 @@ type (
 	Game struct {
 		nextBallID    uint64
 		Balls         *gamelib.Collection[*Ball]
-		SpatialHash   *hshg.SpatialHash[*Ball, float64]
+		SpatialHash   *hshg.SpatialHash2[*Ball, float64]
 		Width, Height float64
 	}
 
@@ -21,7 +21,7 @@ type (
 		ID                 uint64
 		Position, Velocity *vector.Vec2[float64]
 		Size               float64
-		AABB               *hshg.AABB[float64]
+		AABB               *hshg.AABB2[float64]
 		collisionIDs       []uint64
 	}
 

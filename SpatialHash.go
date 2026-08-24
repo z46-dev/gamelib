@@ -1,5 +1,7 @@
 package gamelib
 
+import "golang.org/x/exp/constraints"
+
 const (
 	SHIFT_A = 10
 
@@ -12,19 +14,15 @@ const (
 )
 
 type (
-	AABB struct {
-		X1, Y1, X2, Y2 float64
-	}
-
-	Collidable interface {
-		GetAABB() *AABB
+	Collidable[T constraints.Float] interface {
+		GetAABB() *AABB[T]
 	}
 
 	// spatialHashEntry is the canonical representation of an item for the duration of one spatial-hash build. Buckets only
 	// store indexes into SpatialHash.entries. This means a T is stored exactly once even if its AABB touches several cells.
-	spatialHashEntry[T Collidable] struct {
+	spatialHashEntry[T Collidable[U], U constraints.Float] struct {
 		item T
-		aabb AABB
+		aabb AABB[U]
 
 		// Query generation in which this entry was last visited. This avoids allocating a map[ID]struct{} for every Retrieve call.
 		seen uint32
@@ -48,11 +46,11 @@ type (
 		buckets []spatialHashBucket
 	}
 
-	SpatialHash[T Collidable] struct {
+	SpatialHash[T Collidable[U], U constraints.Float] struct {
 		levels [hashLevels]spatialHashLevel
 
 		// Every inserted item occurs exactly once here.
-		entries []spatialHashEntry[T]
+		entries []spatialHashEntry[T, U]
 
 		// Items which are so large that inserting them into even the coarse grid would be more expensive than simply testing them directly.
 		oversized []uint32
@@ -69,23 +67,8 @@ type (
 	}
 )
 
-func (a *AABB) Contains(x, y float64) (contains bool) {
-	contains = x >= a.X1 && x <= a.X2 && y >= a.Y1 && y <= a.Y2
-	return
-}
-
-func (a *AABB) Intersects(b *AABB) (intersects bool) {
-	intersects = a.X1 <= b.X2 && a.X2 >= b.X1 && a.Y1 <= b.Y2 && a.Y2 >= b.Y1
-	return
-}
-
-func (a *AABB) GetCenter() (center *Vec2) {
-	center = NewVec2((a.X1+a.X2)/2, (a.Y1+a.Y2)/2)
-	return
-}
-
-func NewSpatialHash[T Collidable]() (sh *SpatialHash[T]) {
-	sh = &SpatialHash[T]{
+func NewSpatialHash[T Collidable[U], U constraints.Float]() (sh *SpatialHash[T, U]) {
+	sh = &SpatialHash[T, U]{
 		generation: 1,
 		levels: [hashLevels]spatialHashLevel{{
 			shift:  fineShift,
@@ -103,8 +86,8 @@ func NewSpatialHash[T Collidable]() (sh *SpatialHash[T]) {
 }
 
 // Performs mathematical floor while avoiding math.Floor (Go's math.Floor would return floor(-0.5) = 0, but we want -1).
-func floorInt(v float64) (i int) {
-	if i = int(v); v < float64(i) {
+func floorInt[T constraints.Float](v T) (i int) {
+	if i = int(v); v < T(i) {
 		i--
 	}
 
@@ -112,7 +95,7 @@ func floorInt(v float64) (i int) {
 }
 
 // Converts a world coordinate into a cell coordinate.
-func cellCoord(v float64, shift uint) (coord int) {
+func cellCoord[T constraints.Float](v T, shift uint) (coord int) {
 	coord = floorInt(v) >> shift
 	return
 }
@@ -123,7 +106,7 @@ func cellKey(x, y int) (key uint64) {
 	return
 }
 
-func cellBounds(aabb *AABB, shift uint) (x1, y1, x2, y2 int) {
+func cellBounds[T constraints.Float](aabb *AABB[T], shift uint) (x1, y1, x2, y2 int) {
 	x1, y1 = cellCoord(aabb.X1, shift), cellCoord(aabb.Y1, shift)
 	x2, y2 = cellCoord(aabb.X2, shift), cellCoord(aabb.Y2, shift)
 	return
@@ -140,14 +123,14 @@ func cellCount(x1, y1, x2, y2 int) (count int64) {
 	return
 }
 
-func intersects(a *AABB, x1, y1, x2, y2 float64) (intersects bool) {
+func intersects[T constraints.Float](a *AABB[T], x1, y1, x2, y2 T) (intersects bool) {
 	intersects = a.X1 <= x2 && a.X2 >= x1 && a.Y1 <= y2 && a.Y2 >= y1
 	return
 }
 
 // Clear starts a new spatial-hash build. Importantly, we do NOT delete every map entry and we do NOT destroy every
 // bucket's backing array. Buckets are lazily reset when they are first reused in the new generation.
-func (sh *SpatialHash[T]) Clear() {
+func (sh *SpatialHash[T, u]) Clear() {
 	for i := range sh.levels {
 		var (
 			level  *spatialHashLevel = &sh.levels[i]
@@ -178,7 +161,7 @@ func (sh *SpatialHash[T]) Clear() {
 }
 
 // Returns an active bucket for a cell, creating or lazily resetting it if necessary.
-func (sh *SpatialHash[T]) getBucket(levelIndex int, key uint64) (bucket *spatialHashBucket) {
+func (sh *SpatialHash[T, u]) getBucket(levelIndex int, key uint64) (bucket *spatialHashBucket) {
 	var (
 		level    *spatialHashLevel = &sh.levels[levelIndex]
 		rawIndex uint32
@@ -209,7 +192,7 @@ func (sh *SpatialHash[T]) getBucket(levelIndex int, key uint64) (bucket *spatial
 
 // chooseLevel selects the finest grid that doesn't cause excessive bucket duplication. Fine and medium objects may
 // touch at most 4 cells. Coarse objects may touch up to 16 cells. Anything larger is put into the oversized list.
-func (sh *SpatialHash[T]) chooseLevel(aabb *AABB) (levelIndex int, x1, y1, x2, y2 int, ok bool) {
+func (sh *SpatialHash[T, U]) chooseLevel(aabb *AABB[U]) (levelIndex int, x1, y1, x2, y2 int, ok bool) {
 	for i := range sh.levels {
 		var shift uint = sh.levels[i].shift
 
@@ -236,14 +219,14 @@ func (sh *SpatialHash[T]) chooseLevel(aabb *AABB) (levelIndex int, x1, y1, x2, y
 	return
 }
 
-func (sh *SpatialHash[T]) Insert(item T) {
+func (sh *SpatialHash[T, U]) Insert(item T) {
 	var (
-		aabbPtr *AABB  = item.GetAABB()
-		aabb    AABB   = *aabbPtr
-		index   uint32 = uint32(len(sh.entries))
+		aabbPtr *AABB[U] = item.GetAABB()
+		aabb    AABB[U]  = *aabbPtr
+		index   uint32   = uint32(len(sh.entries))
 	)
 
-	sh.entries = append(sh.entries, spatialHashEntry[T]{item: item, aabb: aabb})
+	sh.entries = append(sh.entries, spatialHashEntry[T, U]{item: item, aabb: aabb})
 	var (
 		levelIndex, x1, y1, x2, y2 int
 		ok                         bool
@@ -264,8 +247,8 @@ func (sh *SpatialHash[T]) Insert(item T) {
 
 // queryCellCount determines roughly how many hash lookups a Retrieve would need. If a query covers a huge
 // area, walking thousands of mostly-empty cells can be slower than simply scanning all cached AABBs.
-func (sh *SpatialHash[T]) queryCellCount(x1, y1, x2, y2 float64) (total int64) {
-	var aabb AABB = AABB{X1: x1, Y1: y1, X2: x2, Y2: y2}
+func (sh *SpatialHash[T, U]) queryCellCount(x1, y1, x2, y2 U) (total int64) {
+	var aabb AABB[U] = AABB[U]{X1: x1, Y1: y1, X2: x2, Y2: y2}
 
 	for i := range sh.levels {
 		var cx1, cy1, cx2, cy2 int = cellBounds(&aabb, sh.levels[i].shift)
@@ -275,9 +258,9 @@ func (sh *SpatialHash[T]) queryCellCount(x1, y1, x2, y2 float64) (total int64) {
 	return
 }
 
-func (sh *SpatialHash[T]) retrieveLinear(x1, y1, x2, y2 float64) (results []T) {
+func (sh *SpatialHash[T, U]) retrieveLinear(x1, y1, x2, y2 U) (results []T) {
 	for i := range sh.entries {
-		var entry *spatialHashEntry[T] = &sh.entries[i]
+		var entry *spatialHashEntry[T, U] = &sh.entries[i]
 		if intersects(&entry.aabb, x1, y1, x2, y2) {
 			results = append(results, entry.item)
 		}
@@ -286,7 +269,7 @@ func (sh *SpatialHash[T]) retrieveLinear(x1, y1, x2, y2 float64) (results []T) {
 	return
 }
 
-func (sh *SpatialHash[T]) retrieve(x1, y1, x2, y2 float64) (results []T) {
+func (sh *SpatialHash[T, U]) retrieve(x1, y1, x2, y2 U) (results []T) {
 	if len(sh.entries) == 0 {
 		return
 	}
@@ -308,8 +291,8 @@ func (sh *SpatialHash[T]) retrieve(x1, y1, x2, y2 float64) (results []T) {
 	}
 
 	var (
-		queryGeneration uint32 = sh.queryGeneration
-		queryAABB       AABB   = AABB{X1: x1, Y1: y1, X2: x2, Y2: y2}
+		queryGeneration uint32  = sh.queryGeneration
+		queryAABB       AABB[U] = AABB[U]{X1: x1, Y1: y1, X2: x2, Y2: y2}
 	)
 
 	for levelIndex := range sh.levels {
@@ -333,7 +316,7 @@ func (sh *SpatialHash[T]) retrieve(x1, y1, x2, y2 float64) (results []T) {
 				}
 
 				for _, entryIndex := range bucket.entries {
-					var entry *spatialHashEntry[T] = &sh.entries[entryIndex]
+					var entry *spatialHashEntry[T, U] = &sh.entries[entryIndex]
 					if entry.seen == queryGeneration {
 						continue
 					}
@@ -348,7 +331,7 @@ func (sh *SpatialHash[T]) retrieve(x1, y1, x2, y2 float64) (results []T) {
 	}
 
 	for _, entryIndex := range sh.oversized {
-		var entry *spatialHashEntry[T] = &sh.entries[entryIndex]
+		var entry *spatialHashEntry[T, U] = &sh.entries[entryIndex]
 		if intersects(&entry.aabb, x1, y1, x2, y2) {
 			results = append(results, entry.item)
 		}
@@ -357,17 +340,17 @@ func (sh *SpatialHash[T]) retrieve(x1, y1, x2, y2 float64) (results []T) {
 	return
 }
 
-func (sh *SpatialHash[T]) Retrieve(aabb *AABB) (results []T) {
+func (sh *SpatialHash[T, U]) Retrieve(aabb *AABB[U]) (results []T) {
 	results = sh.retrieve(aabb.X1, aabb.Y1, aabb.X2, aabb.Y2)
 	return
 }
 
-func (sh *SpatialHash[T]) RetrieveAround(x, y, radius float64) (results []T) {
+func (sh *SpatialHash[T, U]) RetrieveAround(x, y, radius U) (results []T) {
 	results = sh.retrieve(x-radius, y-radius, x+radius, y+radius)
 	return
 }
 
-func (sh *SpatialHash[T]) All() (results []T) {
+func (sh *SpatialHash[T, U]) All() (results []T) {
 	if len(sh.entries) == 0 {
 		return
 	}

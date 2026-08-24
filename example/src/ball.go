@@ -3,13 +3,17 @@ package main
 import (
 	"slices"
 
-	"github.com/z46-dev/gamelib"
+	"github.com/z46-dev/gamelib/gmath"
+	"github.com/z46-dev/gamelib/hshg"
+	"github.com/z46-dev/gamelib/vector"
 )
 
 func NewBall(g *Game) (b *Ball) {
 	b = &Ball{
-		game: g,
-		ID:   g.nextBallID,
+		game:     g,
+		ID:       g.nextBallID,
+		Position: vector.Vec2_0[float64](),
+		Velocity: vector.Vec2_0[float64](),
 	}
 
 	g.nextBallID++
@@ -17,7 +21,7 @@ func NewBall(g *Game) (b *Ball) {
 	return
 }
 
-func (b *Ball) GetAABB() (aabb *gamelib.AABB[float64]) {
+func (b *Ball) GetAABB() (aabb *hshg.AABB[float64]) {
 	aabb = b.AABB
 	return
 }
@@ -33,8 +37,8 @@ func (b *Ball) Update(damping, positionFactor float64) {
 }
 
 func (b *Ball) confine() {
-	b.Position.X = gamelib.Clamp(b.Position.X, b.Size, b.game.Width-b.Size)
-	b.Position.Y = gamelib.Clamp(b.Position.Y, b.Size, b.game.Height-b.Size)
+	b.Position.X = gmath.Clamp(b.Position.X, b.Size, b.game.Width-b.Size)
+	b.Position.Y = gmath.Clamp(b.Position.Y, b.Size, b.game.Height-b.Size)
 }
 
 func (b *Ball) syncEntityAABB() {

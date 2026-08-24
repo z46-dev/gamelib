@@ -4,6 +4,7 @@ import (
 	"math"
 
 	"github.com/z46-dev/gamelib"
+	"github.com/z46-dev/gamelib/hshg"
 )
 
 const (
@@ -14,7 +15,7 @@ const (
 func NewGame() (g *Game) {
 	g = &Game{
 		Balls:       gamelib.NewCollection[*Ball](),
-		SpatialHash: gamelib.NewSpatialHash[*Ball](),
+		SpatialHash: hshg.NewSpatialHash[*Ball](),
 	}
 
 	return

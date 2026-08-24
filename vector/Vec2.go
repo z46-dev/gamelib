@@ -1,15 +1,11 @@
-package gamelib
+package vector
 
 import (
 	"math"
 
+	"github.com/z46-dev/gamelib/gmath"
 	"golang.org/x/exp/constraints"
 )
-
-// Represents a 2D vector with X and Y components.
-type Vec2[T constraints.Float] struct {
-	X, Y T
-}
 
 // NewVec2 creates a new Vec2 with the given X and Y values.
 func NewVec2[T constraints.Float](x, y T) (vec *Vec2[T]) {
@@ -52,6 +48,14 @@ func (v *Vec2[T]) Copy() (copy *Vec2[T]) {
 	return
 }
 
+// CopyInto copies the values of the current Vec2 into another Vec2, returning the current Vec2. Useful for avoiding extra allocations.
+func (v *Vec2[T]) CopyInto(newVec *Vec2[T]) (self *Vec2[T]) {
+	newVec.X, newVec.Y = v.X, v.Y
+
+	self = v
+	return
+}
+
 // Length calculates and returns the length (magnitude) of the Vec2.
 func (v *Vec2[T]) Length() (length T) {
 	length = T(math.Sqrt(float64(v.X*v.X + v.Y*v.Y)))
@@ -87,8 +91,7 @@ func (v *Vec2[T]) Normalize() (self *Vec2[T]) {
 
 // Zero sets both X and Y components of the Vec2 to 0.
 func (v *Vec2[T]) Zero() (self *Vec2[T]) {
-	v.X = 0
-	v.Y = 0
+	v.X, v.Y = 0, 0
 
 	self = v
 	return
@@ -166,9 +169,8 @@ func (v *Vec2[T]) RotateAround(angle T, pivot *Vec2[T]) (self *Vec2[T]) {
 }
 
 // Lerp performs linear interpolation between the current Vec2 and a target Vec2 based on the parameter t (0 <= t <= 1).
-func (v *Vec2[T]) Lerp(target *Vec2[T], t T) (self *Vec2[T]) {
-	v.X = Lerp(v.X, target.X, t)
-	v.Y = Lerp(v.Y, target.Y, t)
+func (v *Vec2[T]) Lerp(previous, current *Vec2[T], t T) (self *Vec2[T]) {
+	v.X, v.Y = gmath.Lerp(previous.X, current.X, t), gmath.Lerp(previous.Y, current.Y, t)
 
 	self = v
 	return
@@ -225,8 +227,8 @@ func (v *Vec2[T]) RotatedAround(angle T, pivot *Vec2[T]) (rotated *Vec2[T]) {
 }
 
 // Lerped returns a new Vec2 that is the result of linear interpolation between the original and a target Vec2 based on the parameter t (0 <= t <= 1).
-func (v *Vec2[T]) Lerped(target *Vec2[T], t T) (lerped *Vec2[T]) {
-	lerped = v.Copy().Lerp(target, t)
+func (v *Vec2[T]) Lerped(previous, current *Vec2[T], t T) (lerped *Vec2[T]) {
+	lerped = v.Copy().Lerp(previous, current, t)
 	return
 }
 

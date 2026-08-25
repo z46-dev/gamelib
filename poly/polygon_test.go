@@ -5,12 +5,11 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/z46-dev/gamelib/gmath"
 	"github.com/z46-dev/gamelib/hshg"
 	"github.com/z46-dev/gamelib/poly"
 	"github.com/z46-dev/gamelib/vector"
 )
-
-const epsilon = 1e-9
 
 func newPolygon(points [][2]float64) (polygon *poly.Polygon[float64]) {
 	var vertices []*vector.Vec2[float64] = make([]*vector.Vec2[float64], len(points))
@@ -33,10 +32,10 @@ func TestPolygonTransformAndQueries(t *testing.T) {
 	assert.False(t, polygon.LineIntersects(vector.NewVec2(-2.0, 2.0), vector.NewVec2(2.0, 2.0)))
 
 	polygon.Transform(vector.NewVec2(5.0, -2.0), 2, math.Pi/2)
-	assert.InDelta(t, 3, polygon.AABB.X1, epsilon)
-	assert.InDelta(t, -4, polygon.AABB.Y1, epsilon)
-	assert.InDelta(t, 7, polygon.AABB.X2, epsilon)
-	assert.InDelta(t, 0, polygon.AABB.Y2, epsilon)
+	assert.InDelta(t, 3, polygon.AABB.X1, gmath.EPSILON)
+	assert.InDelta(t, -4, polygon.AABB.Y1, gmath.EPSILON)
+	assert.InDelta(t, 7, polygon.AABB.X2, gmath.EPSILON)
+	assert.InDelta(t, 0, polygon.AABB.Y2, gmath.EPSILON)
 	assert.True(t, polygon.PointIsInside(vector.NewVec2(5.0, -2.0)))
 }
 
@@ -90,7 +89,7 @@ func TestCirclePolygonResolution(t *testing.T) {
 
 	point, angle = poly.ResolveCirclePolygon(vector.NewVec2(1.25, 0.0), 0.5, polygon)
 	assert.NotNil(t, point)
-	assert.InDelta(t, 1.5, point.X, epsilon)
-	assert.InDelta(t, 0, point.Y, epsilon)
-	assert.InDelta(t, 0, angle, epsilon)
+	assert.InDelta(t, 1.5, point.X, gmath.EPSILON)
+	assert.InDelta(t, 0, point.Y, gmath.EPSILON)
+	assert.InDelta(t, 0, angle, gmath.EPSILON)
 }

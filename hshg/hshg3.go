@@ -5,6 +5,79 @@ import (
 	"golang.org/x/exp/constraints"
 )
 
+// newSpatialHash3Lookup creates a power-of-two open-addressed cell table.
+func newSpatialHash3Lookup(capacity int) (lookup spatialHash3Lookup) {
+	var size int = 16
+	for size < capacity*2 {
+		size <<= 1
+	}
+	lookup.keys = make([]spatialHash3Cell, size)
+	lookup.values = make([]uint32, size)
+	return
+}
+
+// hashSpatialHash3Cell mixes three signed coordinates into one probe seed.
+func hashSpatialHash3Cell(cell spatialHash3Cell) (hash uint64) {
+	hash = uint64(int64(cell.X))*0x9e3779b185ebca87 ^ uint64(int64(cell.Y))*0xc2b2ae3d27d4eb4f ^ uint64(int64(cell.Z))*0x165667b19e3779f9
+	hash ^= hash >> 33
+	hash *= 0xff51afd7ed558ccd
+	hash ^= hash >> 33
+	return
+}
+
+// get retrieves a cell's stable bucket index.
+func (l *spatialHash3Lookup) get(key spatialHash3Cell) (value uint32, found bool) {
+	if len(l.values) == 0 {
+		return
+	}
+	var index int = int(hashSpatialHash3Cell(key) & uint64(len(l.values)-1))
+	for l.values[index] != 0 {
+		if l.keys[index] == key {
+			value, found = l.values[index], true
+			return
+		}
+		index = (index + 1) & (len(l.values) - 1)
+	}
+	return
+}
+
+// set inserts a cell and grows the table before probe chains become dense.
+func (l *spatialHash3Lookup) set(key spatialHash3Cell, value uint32) {
+	if len(l.values) == 0 {
+		*l = newSpatialHash3Lookup(16)
+	}
+	if (l.used+1)*10 >= len(l.values)*7 {
+		l.grow()
+	}
+	var index int = int(hashSpatialHash3Cell(key) & uint64(len(l.values)-1))
+	for l.values[index] != 0 {
+		if l.keys[index] == key {
+			l.values[index] = value
+			return
+		}
+		index = (index + 1) & (len(l.values) - 1)
+	}
+	l.keys[index], l.values[index] = key, value
+	l.used++
+}
+
+// grow doubles the lookup while preserving stable bucket values.
+func (l *spatialHash3Lookup) grow() {
+	var grown spatialHash3Lookup = newSpatialHash3Lookup(len(l.values))
+	for i := range l.values {
+		if l.values[i] != 0 {
+			grown.set(l.keys[i], l.values[i])
+		}
+	}
+	*l = grown
+}
+
+// clear removes every key while retaining table storage.
+func (l *spatialHash3Lookup) clear() {
+	clear(l.values)
+	l.used = 0
+}
+
 // Contains reports whether a point lies inside or on the boundary of the AABB3.
 func (a *AABB3[T]) Contains(x, y, z T) (contains bool) {
 	contains = x >= a.X1 && x <= a.X2 && y >= a.Y1 && y <= a.Y2 && z >= a.Z1 && z <= a.Z2
@@ -90,7 +163,7 @@ func NewSpatialHash3[T Collidable3[U], U constraints.Float](options ...SpatialHa
 		sh.levels[i] = spatialHash3Level{
 			shift:             config.Levels[i].Shift,
 			maxCellsPerObject: config.Levels[i].MaxCellsPerObject,
-			lookup:            make(map[spatialHash3Cell]uint32, 1024),
+			lookup:            newSpatialHash3Lookup(1024),
 		}
 	}
 
@@ -148,9 +221,9 @@ func (sh *SpatialHash3[T, U]) Clear() {
 			active int                = sh.activeBuckets[i]
 		)
 
-		if len(level.lookup) > 4096 && len(level.lookup) > active*4 {
+		if level.lookup.used > 4096 && level.lookup.used > active*4 {
 			var capacity int = max(active*2, 1024)
-			level.lookup = make(map[spatialHash3Cell]uint32, capacity)
+			level.lookup = newSpatialHash3Lookup(capacity)
 			level.buckets = level.buckets[:0]
 		}
 
@@ -166,7 +239,7 @@ func (sh *SpatialHash3[T, U]) Clear() {
 
 		for i := range sh.levels {
 			var level *spatialHash3Level = &sh.levels[i]
-			clear(level.lookup)
+			level.lookup.clear()
 			level.buckets = level.buckets[:0]
 		}
 	}
@@ -180,10 +253,10 @@ func (sh *SpatialHash3[T, U]) getBucket(levelIndex int, key spatialHash3Cell) (b
 		found    bool
 	)
 
-	if rawIndex, found = level.lookup[key]; !found {
+	if rawIndex, found = level.lookup.get(key); !found {
 		var index int = len(level.buckets)
 		level.buckets = append(level.buckets, spatialHash3Bucket{generation: sh.generation})
-		level.lookup[key] = uint32(index + 1)
+		level.lookup.set(key, uint32(index+1))
 		sh.activeBuckets[levelIndex]++
 		bucket = &level.buckets[index]
 		return
@@ -326,7 +399,7 @@ func (sh *SpatialHash3[T, U]) retrieve(results []T, x1, y1, z1, x2, y2, z2 U) (r
 						found    bool
 					)
 
-					if rawIndex, found = level.lookup[spatialHash3Cell{X: cx, Y: cy, Z: cz}]; !found {
+					if rawIndex, found = level.lookup.get(spatialHash3Cell{X: cx, Y: cy, Z: cz}); !found {
 						continue
 					}
 
@@ -441,7 +514,7 @@ func (sh *SpatialHash3[T, U]) visit(x1, y1, z1, x2, y2, z2 U, visitor func(T) bo
 						found    bool
 					)
 
-					if rawIndex, found = level.lookup[spatialHash3Cell{X: cx, Y: cy, Z: cz}]; !found {
+					if rawIndex, found = level.lookup.get(spatialHash3Cell{X: cx, Y: cy, Z: cz}); !found {
 						continue
 					}
 

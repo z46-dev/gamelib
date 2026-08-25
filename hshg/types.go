@@ -93,6 +93,13 @@ type (
 		X, Y, Z int
 	}
 
+	// spatialHash3Lookup is an open-addressed table that hashes cell coordinates once per probe.
+	spatialHash3Lookup struct {
+		keys   []spatialHash3Cell
+		values []uint32
+		used   int
+	}
+
 	// spatialHash3Entry is the canonical representation of an item for one spatial-hash build.
 	spatialHash3Entry[T any, U constraints.Float] struct {
 		item T
@@ -110,7 +117,7 @@ type (
 	spatialHash3Level struct {
 		shift             uint
 		maxCellsPerObject int64
-		lookup            map[spatialHash3Cell]uint32
+		lookup            spatialHash3Lookup
 		buckets           []spatialHash3Bucket
 	}
 

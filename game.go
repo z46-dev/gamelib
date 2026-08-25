@@ -1,13 +1,12 @@
 package gamelib
 
 import (
-	"math"
 	"slices"
 	"sync"
 	"time"
-)
 
-var EPSILON float64 = math.Nextafter(1.0, 2.0) - 1.0
+	"github.com/z46-dev/gamelib/gmath"
+)
 
 type (
 	GameMetrics struct {
@@ -25,6 +24,7 @@ type (
 
 	GameWrapper struct {
 		Game               Game
+		MaximumDelta       float64
 		runOnce, stopOnce  sync.Once
 		doneChan, stopChan chan struct{}
 		ticksPerSecond     float64
@@ -41,6 +41,7 @@ type (
 func New(game Game, ticksPerSecond float64) (gw *GameWrapper) {
 	gw = &GameWrapper{
 		Game:           game,
+		MaximumDelta:   0.25,
 		ticksPerSecond: ticksPerSecond,
 		doneChan:       make(chan struct{}),
 		stopChan:       make(chan struct{}),
@@ -69,17 +70,17 @@ func (gw *GameWrapper) Start() {
 			select {
 			case <-ticker.C:
 				var (
-					now time.Time = time.Now()
-					dt  float64   = min(now.Sub(lastTime).Seconds(), EPSILON)
+					now     time.Time = time.Now()
+					elapsed float64   = max(now.Sub(lastTime).Seconds(), gmath.EPSILON)
 				)
 
 				lastTime = now
-				gw.Game.Update(dt)
+				gw.Game.Update(min(elapsed, gw.MaximumDelta))
 
 				gw.Metrics.Ticks.current++
 				gw.Metrics.Time.records = append(gw.Metrics.Time.records, time.Since(lastTime).Seconds())
 
-				if secondCounter += dt; secondCounter >= 1.0 {
+				if secondCounter += elapsed; secondCounter >= 1.0 {
 					secondCounter = 0
 					gw.Metrics.Ticks.Actual = float64(gw.Metrics.Ticks.current)
 					gw.Metrics.Ticks.current = 0

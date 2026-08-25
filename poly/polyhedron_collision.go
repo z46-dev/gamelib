@@ -13,6 +13,7 @@ func TwoPolyhedraIntersect[T constraints.Float](first, second *Polyhedron[T]) (i
 	if !first.AABB.Intersects(second.AABB) {
 		return
 	}
+
 	if bvhTrianglesIntersect(first, first.bvhRoot, second, second.bvhRoot, nil) {
 		intersects = true
 		return
@@ -24,11 +25,18 @@ func TwoPolyhedraIntersect[T constraints.Float](first, second *Polyhedron[T]) (i
 
 // GetPolyhedronContactManifold returns surface crossings and contained-vertex penetration contacts.
 func GetPolyhedronContactManifold[T constraints.Float](first, second *Polyhedron[T]) (manifold PolyhedronManifold[T]) {
+	manifold = GetPolyhedronContactManifoldInto(first, second, make([]PolyhedronContact[T], 0, 32))
+	return
+}
+
+// GetPolyhedronContactManifoldInto reuses contact storage while rebuilding a contact manifold.
+func GetPolyhedronContactManifoldInto[T constraints.Float](first, second *Polyhedron[T], contacts []PolyhedronContact[T]) (manifold PolyhedronManifold[T]) {
+	manifold.Contacts = contacts[:0]
 	if !first.AABB.Intersects(second.AABB) {
 		return
 	}
 
-	var points []vector.Vec3[T]
+	var points []vector.Vec3[T] = make([]vector.Vec3[T], 0, 16)
 	bvhTrianglesIntersect(first, first.bvhRoot, second, second.bvhRoot, &points)
 	var (
 		firstCenter  vector.Vec3[T] = first.Centroid()
@@ -92,15 +100,18 @@ func appendContainedVertexContacts[T constraints.Float](source, container *Polyh
 			normal  vector.Vec3[T] = vector.Vec3[T]{X: vertex.X - closest.X, Y: vertex.Y - closest.Y, Z: vertex.Z - closest.Z}
 			depth   T              = normal.Length()
 		)
+
 		if depth <= polyhedronTolerance(container) {
 			continue
 		}
+
 		normal.Mul(1 / depth)
 		if flip {
 			normal.Mul(-1)
 		}
 		appendPolyhedronContact(contacts, PolyhedronContact[T]{Point: closest, Normal: normal, Penetration: depth})
 	}
+
 	for i := range source.faces {
 		appendInteriorPointContact(vector.Vec3[T]{
 			X: (source.faces[i].A.X + source.faces[i].B.X + source.faces[i].C.X) / 3,
@@ -121,13 +132,16 @@ func appendInteriorPointContact[T constraints.Float](point vector.Vec3[T], conta
 		normal  vector.Vec3[T] = vector.Vec3[T]{X: point.X - closest.X, Y: point.Y - closest.Y, Z: point.Z - closest.Z}
 		depth   T              = normal.Length()
 	)
+
 	if depth <= polyhedronTolerance(container) {
 		return
 	}
+
 	normal.Mul(1 / depth)
 	if flip {
 		normal.Mul(-1)
 	}
+
 	appendPolyhedronContact(contacts, PolyhedronContact[T]{Point: closest, Normal: normal, Penetration: depth})
 }
 
@@ -140,6 +154,7 @@ func appendPolyhedronContact[T constraints.Float](contacts *[]PolyhedronContact[
 			dy T = (*contacts)[i].Point.Y - contact.Point.Y
 			dz T = (*contacts)[i].Point.Z - contact.Point.Z
 		)
+
 		if dx*dx+dy*dy+dz*dz <= tolerance*tolerance {
 			if contact.Penetration > (*contacts)[i].Penetration {
 				(*contacts)[i] = contact
@@ -147,6 +162,7 @@ func appendPolyhedronContact[T constraints.Float](contacts *[]PolyhedronContact[
 			return
 		}
 	}
+
 	*contacts = append(*contacts, contact)
 }
 
@@ -160,6 +176,7 @@ func bvhTrianglesIntersect[T constraints.Float](first *Polyhedron[T], firstNode 
 		left  *polyhedronBVHNode[T] = &first.bvh[firstNode]
 		right *polyhedronBVHNode[T] = &second.bvh[secondNode]
 	)
+
 	if left.count != 0 && right.count != 0 {
 		for i := left.start; i < left.start+left.count; i++ {
 			var firstFace *PolyhedronTriangle[T] = &first.faces[first.faceOrder[i]]
@@ -168,19 +185,23 @@ func bvhTrianglesIntersect[T constraints.Float](first *Polyhedron[T], firstNode 
 				if !firstFace.AABB.Intersects(&secondFace.AABB) {
 					continue
 				}
-				var contacts []vector.Vec3[T] = triangleContacts(*firstFace, *secondFace)
-				if len(contacts) == 0 {
+
+				if points == nil {
+					if trianglesIntersect(*firstFace, *secondFace) {
+						intersects = true
+						return
+					}
 					continue
 				}
-				intersects = true
-				if points == nil {
-					return
-				}
-				for k := range contacts {
-					appendUniquePoint(points, contacts[k])
+
+				var previousCount int = len(*points)
+				triangleContactsInto(points, *firstFace, *secondFace)
+				if len(*points) != previousCount {
+					intersects = true
 				}
 			}
 		}
+
 		return
 	}
 
@@ -189,14 +210,17 @@ func bvhTrianglesIntersect[T constraints.Float](first *Polyhedron[T], firstNode 
 		if points == nil && intersects {
 			return
 		}
+
 		intersects = bvhTrianglesIntersect(first, left.right, second, secondNode, points) || intersects
 	} else {
 		intersects = bvhTrianglesIntersect(first, firstNode, second, right.left, points)
 		if points == nil && intersects {
 			return
 		}
+
 		intersects = bvhTrianglesIntersect(first, firstNode, second, right.right, points) || intersects
 	}
+
 	return
 }
 
@@ -206,37 +230,84 @@ func polyhedronBoundsVolume[T constraints.Float](bounds hshg.AABB3[T]) (volume f
 	return
 }
 
-// triangleContacts returns all unique edge and coplanar contacts between two triangles.
-func triangleContacts[T constraints.Float](first, second PolyhedronTriangle[T]) (contacts []vector.Vec3[T]) {
+// trianglesIntersect reports triangle overlap without allocating contact storage.
+func trianglesIntersect[T constraints.Float](first, second PolyhedronTriangle[T]) (intersects bool) {
 	var (
 		firstVertices  [3]vector.Vec3[T] = [3]vector.Vec3[T]{first.A, first.B, first.C}
 		secondVertices [3]vector.Vec3[T] = [3]vector.Vec3[T]{second.A, second.B, second.C}
 	)
+
 	for i := range firstVertices {
-		appendSegmentTriangleContact(&contacts, firstVertices[i], firstVertices[(i+1)%3], second)
-		appendSegmentTriangleContact(&contacts, secondVertices[i], secondVertices[(i+1)%3], first)
+		if segmentIntersectsTriangle(firstVertices[i], firstVertices[(i+1)%3], second) || segmentIntersectsTriangle(secondVertices[i], secondVertices[(i+1)%3], first) {
+			intersects = true
+			return
+		}
 	}
 
-	if len(contacts) == 0 && trianglesCoplanar(first, second) {
+	if trianglesCoplanar(first, second) {
+		for i := range firstVertices {
+			if pointInTriangle3(firstVertices[i], second, 1e-9) || pointInTriangle3(secondVertices[i], first, 1e-9) {
+				intersects = true
+				return
+			}
+
+			for j := range secondVertices {
+				if _, intersects = coplanarSegmentsIntersect(firstVertices[i], firstVertices[(i+1)%3], secondVertices[j], secondVertices[(j+1)%3], first.Normal); intersects {
+					return
+				}
+			}
+		}
+	}
+	return
+}
+
+// triangleContactsInto appends all unique edge and coplanar contacts into caller-owned storage.
+func triangleContactsInto[T constraints.Float](contacts *[]vector.Vec3[T], first, second PolyhedronTriangle[T]) {
+	var (
+		firstVertices  [3]vector.Vec3[T] = [3]vector.Vec3[T]{first.A, first.B, first.C}
+		secondVertices [3]vector.Vec3[T] = [3]vector.Vec3[T]{second.A, second.B, second.C}
+		initialCount   int               = len(*contacts)
+	)
+
+	for i := range firstVertices {
+		appendSegmentTriangleContact(contacts, firstVertices[i], firstVertices[(i+1)%3], second)
+		appendSegmentTriangleContact(contacts, secondVertices[i], secondVertices[(i+1)%3], first)
+	}
+
+	if len(*contacts) == initialCount && trianglesCoplanar(first, second) {
 		for i := range firstVertices {
 			if pointInTriangle3(firstVertices[i], second, 1e-9) {
-				appendUniquePoint(&contacts, firstVertices[i])
+				appendUniquePoint(contacts, firstVertices[i])
 			}
+
 			if pointInTriangle3(secondVertices[i], first, 1e-9) {
-				appendUniquePoint(&contacts, secondVertices[i])
+				appendUniquePoint(contacts, secondVertices[i])
 			}
+
 			for j := range secondVertices {
 				var (
 					contact vector.Vec3[T]
 					hit     bool
 				)
+
 				contact, hit = coplanarSegmentsIntersect(firstVertices[i], firstVertices[(i+1)%3], secondVertices[j], secondVertices[(j+1)%3], first.Normal)
 				if hit {
-					appendUniquePoint(&contacts, contact)
+					appendUniquePoint(contacts, contact)
 				}
 			}
 		}
 	}
+}
+
+// segmentIntersectsTriangle reports whether a finite segment touches a triangle.
+func segmentIntersectsTriangle[T constraints.Float](start, end vector.Vec3[T], triangle PolyhedronTriangle[T]) (intersects bool) {
+	var (
+		direction vector.Vec3[T] = vector.Vec3[T]{X: end.X - start.X, Y: end.Y - start.Y, Z: end.Z - start.Z}
+		parameter T
+	)
+
+	parameter, intersects = rayIntersectsTriangle(start, direction, triangle.A, triangle.B, triangle.C)
+	intersects = intersects && parameter <= 1
 	return
 }
 
@@ -247,6 +318,7 @@ func coplanarSegmentsIntersect[T constraints.Float](a, b, c, d, normal vector.Ve
 		a1, a2, b1, b2 T
 		c1, c2, d1, d2 T
 	)
+
 	if nx >= ny && nx >= nz {
 		a1, a2, b1, b2, c1, c2, d1, d2 = a.Y, a.Z, b.Y, b.Z, c.Y, c.Z, d.Y, d.Z
 	} else if ny >= nz {
@@ -259,13 +331,16 @@ func coplanarSegmentsIntersect[T constraints.Float](a, b, c, d, normal vector.Ve
 	if math.Abs(float64(denominator)) <= 1e-12 {
 		return
 	}
+
 	var (
 		t T = ((c1-a1)*(d2-c2) - (c2-a2)*(d1-c1)) / denominator
 		u T = ((c1-a1)*(b2-a2) - (c2-a2)*(b1-a1)) / denominator
 	)
+
 	if t < 0 || t > 1 || u < 0 || u > 1 {
 		return
 	}
+
 	point = vector.Vec3[T]{X: a.X + (b.X-a.X)*t, Y: a.Y + (b.Y-a.Y)*t, Z: a.Z + (b.Z-a.Z)*t}
 	intersects = true
 	return
@@ -278,6 +353,7 @@ func appendSegmentTriangleContact[T constraints.Float](contacts *[]vector.Vec3[T
 		parameter T
 		hit       bool
 	)
+
 	parameter, hit = rayIntersectsTriangle(start, direction, triangle.A, triangle.B, triangle.C)
 	if hit && parameter <= 1 {
 		appendUniquePoint(contacts, vector.Vec3[T]{X: start.X + direction.X*parameter, Y: start.Y + direction.Y*parameter, Z: start.Z + direction.Z*parameter})

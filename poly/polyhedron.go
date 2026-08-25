@@ -450,6 +450,8 @@ func rayIntersectsTriangle[T constraints.Float](origin, direction, a, b, c vecto
 
 // Copy returns a deep copy whose geometry and bounds can be modified independently.
 func (p *Polyhedron[T]) Copy() (copy *Polyhedron[T]) {
+	var bvh []polyhedronBVHNode[T] = make([]polyhedronBVHNode[T], 0, max(len(p.Triangles)*2, len(p.bvh)))
+	bvh = append(bvh, p.bvh...)
 	copy = &Polyhedron[T]{
 		Reference:   append([]vector.Vec3[T](nil), p.Reference...),
 		Points:      append([]vector.Vec3[T](nil), p.Points...),
@@ -459,7 +461,7 @@ func (p *Polyhedron[T]) Copy() (copy *Polyhedron[T]) {
 		transformed: p.transformed,
 		faces:       append([]PolyhedronTriangle[T](nil), p.faces...),
 		faceOrder:   append([]int(nil), p.faceOrder...),
-		bvh:         append([]polyhedronBVHNode[T](nil), p.bvh...),
+		bvh:         bvh,
 		bvhRoot:     p.bvhRoot,
 	}
 	return

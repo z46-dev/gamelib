@@ -2,7 +2,6 @@ package poly
 
 import (
 	"math"
-	"sort"
 
 	"github.com/z46-dev/gamelib/hshg"
 	"github.com/z46-dev/gamelib/vector"
@@ -13,8 +12,13 @@ const polyhedronBVHLeafSize = 4
 
 // rebuildAccelerationData caches transformed triangles and builds their bounding-volume hierarchy.
 func (p *Polyhedron[T]) rebuildAccelerationData() {
-	p.faces = make([]PolyhedronTriangle[T], len(p.Triangles))
-	p.faceOrder = make([]int, len(p.Triangles))
+	if cap(p.faces) < len(p.Triangles) {
+		p.faces = make([]PolyhedronTriangle[T], len(p.Triangles))
+		p.faceOrder = make([]int, len(p.Triangles))
+	} else {
+		p.faces = p.faces[:len(p.Triangles)]
+		p.faceOrder = p.faceOrder[:len(p.Triangles)]
+	}
 	for i := range p.Triangles {
 		var (
 			triangle Triangle3              = p.Triangles[i]
@@ -38,7 +42,11 @@ func (p *Polyhedron[T]) rebuildAccelerationData() {
 		p.faceOrder[i] = i
 	}
 
-	p.bvh = p.bvh[:0]
+	if cap(p.bvh) < len(p.Triangles)*2 {
+		p.bvh = make([]polyhedronBVHNode[T], 0, len(p.Triangles)*2)
+	} else {
+		p.bvh = p.bvh[:0]
+	}
 	if len(p.faceOrder) == 0 {
 		p.bvhRoot = -1
 		return
@@ -74,24 +82,60 @@ func (p *Polyhedron[T]) buildBVHNode(start, end int) (index int) {
 	if zSize > xSize {
 		axis = 2
 	}
-	sort.Slice(p.faceOrder[start:end], func(i, j int) bool {
-		var (
-			left  *PolyhedronTriangle[T] = &p.faces[p.faceOrder[start+i]]
-			right *PolyhedronTriangle[T] = &p.faces[p.faceOrder[start+j]]
-		)
-		if axis == 0 {
-			return left.A.X+left.B.X+left.C.X < right.A.X+right.B.X+right.C.X
-		}
-		if axis == 1 {
-			return left.A.Y+left.B.Y+left.C.Y < right.A.Y+right.B.Y+right.C.Y
-		}
-		return left.A.Z+left.B.Z+left.C.Z < right.A.Z+right.B.Z+right.C.Z
-	})
+	p.sortFacesByAxis(start, end-1, axis)
 
 	var middle int = start + (end-start)/2
 	p.bvh[index].left = p.buildBVHNode(start, middle)
 	p.bvh[index].right = p.buildBVHNode(middle, end)
 	p.bvh[index].count = 0
+	return
+}
+
+// sortFacesByAxis sorts a face-order range without reflection or heap allocation.
+func (p *Polyhedron[T]) sortFacesByAxis(low, high, axis int) {
+	for low < high {
+		var (
+			i, j  int = low, high
+			pivot T   = p.faceCentroidAxis(p.faceOrder[low+(high-low)/2], axis)
+		)
+		for i <= j {
+			for p.faceCentroidAxis(p.faceOrder[i], axis) < pivot {
+				i++
+			}
+			for p.faceCentroidAxis(p.faceOrder[j], axis) > pivot {
+				j--
+			}
+			if i <= j {
+				p.faceOrder[i], p.faceOrder[j] = p.faceOrder[j], p.faceOrder[i]
+				i++
+				j--
+			}
+		}
+
+		if j-low < high-i {
+			if low < j {
+				p.sortFacesByAxis(low, j, axis)
+			}
+			low = i
+		} else {
+			if i < high {
+				p.sortFacesByAxis(i, high, axis)
+			}
+			high = j
+		}
+	}
+}
+
+// faceCentroidAxis returns an unscaled centroid coordinate used only for ordering.
+func (p *Polyhedron[T]) faceCentroidAxis(index, axis int) (coordinate T) {
+	var face *PolyhedronTriangle[T] = &p.faces[index]
+	if axis == 0 {
+		coordinate = face.A.X + face.B.X + face.C.X
+	} else if axis == 1 {
+		coordinate = face.A.Y + face.B.Y + face.C.Y
+	} else {
+		coordinate = face.A.Z + face.B.Z + face.C.Z
+	}
 	return
 }
 

@@ -75,7 +75,7 @@ func (gw *GameWrapper) Start() {
 				)
 
 				lastTime = now
-				gw.Game.Update(min(elapsed, gw.MaximumDelta))
+				gw.updateElapsed(elapsed)
 
 				gw.Metrics.Ticks.current++
 				gw.Metrics.Time.records = append(gw.Metrics.Time.records, time.Since(lastTime).Seconds())
@@ -103,6 +103,21 @@ func (gw *GameWrapper) Start() {
 			}
 		}
 	})
+}
+
+// updateElapsed advances all elapsed time in bounded chunks so lag is never discarded.
+func (gw *GameWrapper) updateElapsed(elapsed float64) {
+	var maximumDelta float64 = gw.MaximumDelta
+	if maximumDelta <= 0 {
+		maximumDelta = elapsed
+	}
+	for elapsed > maximumDelta {
+		gw.Game.Update(maximumDelta)
+		elapsed -= maximumDelta
+	}
+	if elapsed > 0 {
+		gw.Game.Update(elapsed)
+	}
 }
 
 func (gw *GameWrapper) Stop() {

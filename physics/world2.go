@@ -13,7 +13,7 @@ import (
 type (
 	contactPair struct {
 		first, second BodyID
-		feature       uint8
+		feature       uint32
 	}
 
 	cachedContact2[T constraints.Float] struct {
@@ -328,11 +328,11 @@ func (w *World2[T]) stepDiscrete(dt T) {
 
 func (w *World2[T]) ccdSubsteps(dt T) (substeps int) {
 	substeps = max(1, int(math.Ceil(float64(dt/w.Config.MaxStepDelta))))
-	if !w.Config.EnableCCD || w.Config.CCDMotionThreshold <= 0 {
+	if w.Config.CCDMotionThreshold <= 0 {
 		return
 	}
 	for _, body := range w.bodyOrder {
-		if !body.Continuous || body.Type != DynamicBody || body.Disabled {
+		if body.Type == StaticBody || body.Disabled || body.Sleeping || !w.Config.EnableCCD && !body.Continuous {
 			continue
 		}
 		var bounds *hshg.AABB2[T] = body.GetAABB()
@@ -348,14 +348,25 @@ func (w *World2[T]) ccdSubsteps(dt T) (substeps int) {
 		if angularSpeed < 0 {
 			angularSpeed = -angularSpeed
 		}
-		var required int = int(math.Ceil(float64((body.Velocity.Length() + angularSpeed*sweepRadius) * dt / limit)))
+		var (
+			linearSpeed         T = body.Velocity.Length()
+			linearAcceleration  vector.Vec2[T]
+			angularAcceleration T
+		)
+		if body.Type == DynamicBody {
+			linearAcceleration = vector.Vec2[T]{X: w.Config.GravityX*body.GravityScale + body.Force.X*body.inverseMass, Y: w.Config.GravityY*body.GravityScale + body.Force.Y*body.inverseMass}
+			angularAcceleration = body.Torque * body.inverseInertia
+		}
+		var endLinearSpeed T = linearSpeed + linearAcceleration.Length()*dt
+		var endAngularSpeed T = angularSpeed
+		if angularAcceleration < 0 {
+			angularAcceleration = -angularAcceleration
+		}
+		endAngularSpeed += angularAcceleration * dt
+		var required int = int(math.Ceil(float64((max(linearSpeed, endLinearSpeed) + max(angularSpeed, endAngularSpeed)*sweepRadius) * dt / limit)))
 		if required > substeps {
 			substeps = required
 		}
-	}
-	var maximum int = max(w.Config.CCDMaxSubsteps, substeps)
-	if substeps > maximum {
-		substeps = maximum
 	}
 	return
 }
@@ -453,12 +464,18 @@ func (w *World2[T]) buildContacts() {
 				if second.Sleeping {
 					second.Wake()
 				}
-				contact.pair = contactPair{first: bodyA.ID, second: bodyB.ID, feature: uint8(contactIndex)}
 				var firstAnchor, secondAnchor vector.Vec2[T] = contactLocalAnchor2(contact.First, contact.Point), contactLocalAnchor2(contact.Second, contact.Point)
-				if cached, found := w.contactCache[contact.pair]; found && w.Config.EnableWarmStarting && cached.normalX*contact.Normal.X+cached.normalY*contact.Normal.Y > 0.9 && anchorsMatch2(cached, firstAnchor, secondAnchor) {
-					contact.normalImpulse, contact.tangentImpulse = cached.normalImpulse, cached.tangentImpulse
+				contact.pair = contactPair{first: bodyA.ID, second: bodyB.ID, feature: contactFeature2(firstAnchor, secondAnchor)}
+				var persistent bool
+				if cached, found := w.contactCache[contact.pair]; found && cached.normalX*contact.Normal.X+cached.normalY*contact.Normal.Y > 0.9 {
+					persistent = true
+					if w.Config.EnableWarmStarting && anchorsMatch2(cached, firstAnchor, secondAnchor) {
+						contact.normalImpulse, contact.tangentImpulse = cached.normalImpulse, cached.tangentImpulse
+					}
 				}
-				contact.restitutionBias = contactRestitutionBias2(&contact)
+				if !persistent {
+					contact.restitutionBias = contactRestitutionBias2(&contact, w.Config.RestitutionThreshold)
+				}
 				w.Contacts = append(w.Contacts, contact)
 			}
 		}
@@ -616,7 +633,7 @@ func anchorsMatch2[T constraints.Float](cached cachedContact2[T], first, second 
 }
 
 // contactRestitutionBias2 captures the desired bounce velocity before iterative solving.
-func contactRestitutionBias2[T constraints.Float](contact *Contact2[T]) (bias T) {
+func contactRestitutionBias2[T constraints.Float](contact *Contact2[T], threshold T) (bias T) {
 	var (
 		rA             vector.Vec2[T] = vector.Vec2[T]{X: contact.Point.X - contact.First.Position.X, Y: contact.Point.Y - contact.First.Position.Y}
 		rB             vector.Vec2[T] = vector.Vec2[T]{X: contact.Point.X - contact.Second.Position.X, Y: contact.Point.Y - contact.Second.Position.Y}
@@ -624,8 +641,17 @@ func contactRestitutionBias2[T constraints.Float](contact *Contact2[T]) (bias T)
 		secondVelocity vector.Vec2[T] = vector.Vec2[T]{X: contact.Second.Velocity.X - contact.Second.AngularVelocity*rB.Y, Y: contact.Second.Velocity.Y + contact.Second.AngularVelocity*rB.X}
 		velocity       T              = (secondVelocity.X-firstVelocity.X)*contact.Normal.X + (secondVelocity.Y-firstVelocity.Y)*contact.Normal.Y
 	)
-	if velocity < -0.5 {
+	if velocity < -threshold {
 		bias = -min(contact.First.Material.Restitution, contact.Second.Material.Restitution) * velocity
+	}
+	return
+}
+
+func contactFeature2[T constraints.Float](first, second vector.Vec2[T]) (feature uint32) {
+	feature = 2166136261
+	for _, value := range []T{first.X, first.Y, second.X, second.Y} {
+		feature ^= uint32(int32(math.Round(float64(value) * 1000)))
+		feature *= 16777619
 	}
 	return
 }
@@ -863,20 +889,29 @@ func resolvePosition2[T constraints.Float](contact *Contact2[T], config WorldCon
 	if contact.First.Sensor || contact.Second.Sensor {
 		return
 	}
-	var inverseMass T = contact.First.inverseMass + contact.Second.inverseMass
-	if inverseMass == 0 {
+	var (
+		first, second *Body2[T]      = contact.First, contact.Second
+		rA            vector.Vec2[T] = vector.Vec2[T]{X: contact.Point.X - first.Position.X, Y: contact.Point.Y - first.Position.Y}
+		rB            vector.Vec2[T] = vector.Vec2[T]{X: contact.Point.X - second.Position.X, Y: contact.Point.Y - second.Position.Y}
+		rACrossNormal T              = rA.X*contact.Normal.Y - rA.Y*contact.Normal.X
+		rBCrossNormal T              = rB.X*contact.Normal.Y - rB.Y*contact.Normal.X
+		denominator   T              = first.inverseMass + second.inverseMass + rACrossNormal*rACrossNormal*first.inverseInertia + rBCrossNormal*rBCrossNormal*second.inverseInertia
+	)
+	if denominator == 0 {
 		return
 	}
-	var magnitude T = max(contact.Penetration-config.PenetrationSlop, 0) * config.PositionCorrection / T(config.PositionIterations) / inverseMass
+	var magnitude T = max(contact.Penetration-config.PenetrationSlop, 0) * config.PositionCorrection / T(config.PositionIterations) / denominator
 	if contact.manifoldCount > 1 {
 		magnitude /= T(contact.manifoldCount)
 	}
-	if contact.First.Type == DynamicBody {
-		contact.First.Position.X -= contact.Normal.X * magnitude * contact.First.inverseMass
-		contact.First.Position.Y -= contact.Normal.Y * magnitude * contact.First.inverseMass
+	if first.Type == DynamicBody {
+		first.Position.X -= contact.Normal.X * magnitude * first.inverseMass
+		first.Position.Y -= contact.Normal.Y * magnitude * first.inverseMass
+		first.Rotation -= rACrossNormal * magnitude * first.inverseInertia
 	}
-	if contact.Second.Type == DynamicBody {
-		contact.Second.Position.X += contact.Normal.X * magnitude * contact.Second.inverseMass
-		contact.Second.Position.Y += contact.Normal.Y * magnitude * contact.Second.inverseMass
+	if second.Type == DynamicBody {
+		second.Position.X += contact.Normal.X * magnitude * second.inverseMass
+		second.Position.Y += contact.Normal.Y * magnitude * second.inverseMass
+		second.Rotation += rBCrossNormal * magnitude * second.inverseInertia
 	}
 }

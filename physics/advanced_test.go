@@ -7,6 +7,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/z46-dev/gamelib/physics"
+	"github.com/z46-dev/gamelib/poly"
 	"github.com/z46-dev/gamelib/vector"
 )
 
@@ -50,7 +51,7 @@ func TestRopeReconnection(t *testing.T) {
 	assert.Equal(t, 3.0, rope.Bodies[1].AngularDamping)
 }
 
-func TestContinuousCollisionDetectionStopsFastCircle(t *testing.T) {
+func TestContinuousCollisionDetectionStopsEveryFastCircle(t *testing.T) {
 	var config physics.WorldConfig[float64] = physics.DefaultWorldConfig[float64]()
 	config.EnableCCD, config.CCDMaxSubsteps, config.CCDMotionThreshold = true, 128, 0.05
 	var world *physics.World2[float64] = physics.NewWorld2(config)
@@ -58,10 +59,55 @@ func TestContinuousCollisionDetectionStopsFastCircle(t *testing.T) {
 	var err error
 	_, err = world.AddBody(physics.Body2Config[float64]{Type: physics.StaticBody, Shape: physics.NewPolygon2([]vector.Vec2[float64]{{X: -0.05, Y: -3}, {X: 0.05, Y: -3}, {X: 0.05, Y: 3}, {X: -0.05, Y: 3}}, 1)})
 	require.NoError(t, err)
-	bullet, err = world.AddBody(physics.Body2Config[float64]{Type: physics.DynamicBody, Shape: physics.NewCircle2(0.1), Position: vector.Vec2[float64]{X: -5}, Velocity: vector.Vec2[float64]{X: 100}, Continuous: true})
+	bullet, err = world.AddBody(physics.Body2Config[float64]{Type: physics.DynamicBody, Shape: physics.NewCircle2(0.1), Position: vector.Vec2[float64]{X: -5}, Velocity: vector.Vec2[float64]{X: 100}})
 	require.NoError(t, err)
 	world.Step(0.1)
 	assert.Less(t, bullet.Position.X, 0.3)
+}
+
+func TestPersistentRestingContactDoesNotReapplyRestitution(t *testing.T) {
+	var config physics.WorldConfig[float64] = physics.DefaultWorldConfig[float64]()
+	config.GravityY = 10
+	var world *physics.World2[float64] = physics.NewWorld2(config)
+	var material physics.Material[float64] = physics.Material[float64]{Density: 1, Restitution: .5, StaticFriction: .6, DynamicFriction: .4}
+	var err error
+	_, err = world.AddBody(physics.Body2Config[float64]{Type: physics.StaticBody, Shape: physics.NewPolygon2([]vector.Vec2[float64]{{X: -5, Y: -.5}, {X: 5, Y: -.5}, {X: 5, Y: .5}, {X: -5, Y: .5}}, 1), Position: vector.Vec2[float64]{Y: 2}, Material: material})
+	require.NoError(t, err)
+	var body *physics.Body2[float64]
+	body, err = world.AddBody(physics.Body2Config[float64]{Type: physics.DynamicBody, Shape: physics.NewCircle2(.5), Material: material})
+	require.NoError(t, err)
+	for range 600 {
+		world.Step(1.0 / 120.0)
+	}
+	assert.True(t, body.Sleeping)
+	assert.InDelta(t, 1, body.Position.Y, .02)
+}
+
+func TestDensePileSettles(t *testing.T) {
+	var config physics.WorldConfig[float64] = physics.DefaultWorldConfig[float64]()
+	config.GravityY, config.PositionCorrection, config.PositionIterations = 700, .8, 6
+	config.SleepLinearThreshold, config.PenetrationSlop = 1, .1
+	var world *physics.World2[float64] = physics.NewWorld2(config)
+	var material physics.Material[float64] = physics.Material[float64]{Density: .01, Restitution: .06, StaticFriction: .75, DynamicFriction: .55}
+	var box *physics.Polygon2[float64] = physics.NewPolygon2([]vector.Vec2[float64]{{X: -10, Y: -10}, {X: 10, Y: -10}, {X: 10, Y: 10}, {X: -10, Y: 10}}, 1)
+	var err error
+	_, err = world.AddBody(physics.Body2Config[float64]{Type: physics.StaticBody, Shape: physics.NewPolygon2([]vector.Vec2[float64]{{X: -1000, Y: -5}, {X: 1000, Y: -5}, {X: 1000, Y: 5}, {X: -1000, Y: 5}}, 1), Position: vector.Vec2[float64]{Y: 100}, Material: material})
+	require.NoError(t, err)
+	var bodies []*physics.Body2[float64]
+	for row := range 4 {
+		for column := range 4 {
+			var body *physics.Body2[float64]
+			body, err = world.AddBody(physics.Body2Config[float64]{Type: physics.DynamicBody, Shape: box, Position: vector.Vec2[float64]{X: float64(column*21 - 31), Y: float64(row * 21)}, Rotation: float64((row+column)%2) * .01, LinearDamping: .65, AngularDamping: .9, Material: material})
+			require.NoError(t, err)
+			bodies = append(bodies, body)
+		}
+	}
+	for range 3600 {
+		world.Step(1.0 / 120.0)
+	}
+	for _, body := range bodies {
+		assert.True(t, body.Sleeping)
+	}
 }
 
 func TestClothAndSoftBodyPreserveShape(t *testing.T) {
@@ -125,6 +171,29 @@ func TestSpinningContactDoesNotCreateEnergy(t *testing.T) {
 	}
 	assert.Less(t, maximumSpeedSquared, 450.0)
 	assert.Less(t, math.Abs(body.Position.X), 15.0)
+}
+
+func TestPolyhedronRestingContactDissipatesEnergy(t *testing.T) {
+	var (
+		config   physics.WorldConfig[float64] = physics.DefaultWorldConfig[float64]()
+		world    *physics.World3[float64]
+		material physics.Material[float64] = physics.Material[float64]{Density: 1, Restitution: 0, StaticFriction: .8, DynamicFriction: .6}
+		pyramid  *poly.Polyhedron[float64]
+		body     *physics.Body3[float64]
+		err      error
+	)
+	config.GravityY, config.VelocityIterations, config.PositionIterations = -10, 16, 6
+	world = physics.NewWorld3(config)
+	_, err = world.AddBody(physics.Body3Config[float64]{Type: physics.StaticBody, Shape: physics.NewPolyhedron3(testCubePolyhedron(), vector.Vec3[float64]{X: 100, Y: .5, Z: 100}), Position: vector.Vec3[float64]{Y: -2.5}, Material: material})
+	require.NoError(t, err)
+	pyramid, err = poly.NewPolyhedron([]vector.Vec3[float64]{{X: -1, Y: -1, Z: -1}, {X: 1, Y: -1, Z: -1}, {X: 1, Y: -1, Z: 1}, {X: -1, Y: -1, Z: 1}, {Y: 1}}, []poly.Triangle3{{A: 0, B: 2, C: 1}, {A: 0, B: 3, C: 2}, {A: 0, B: 1, C: 4}, {A: 1, B: 2, C: 4}, {A: 2, B: 3, C: 4}, {A: 3, B: 0, C: 4}})
+	require.NoError(t, err)
+	body, err = world.AddBody(physics.Body3Config[float64]{Type: physics.DynamicBody, Shape: physics.NewPolyhedron3(pyramid, vector.Vec3[float64]{X: .6, Y: .6, Z: .6}), Position: vector.Vec3[float64]{Y: 1}, Rotation: vector.Vec3[float64]{X: .35, Z: .2}, AngularVelocity: vector.Vec3[float64]{X: 2, Y: 1, Z: -1}, Material: material})
+	require.NoError(t, err)
+	for range 4800 {
+		world.Step(1.0 / 240.0)
+	}
+	assert.Less(t, body.Velocity.SquaredLength()+body.AngularVelocity.SquaredLength(), .05)
 }
 
 func TestPolygonFaceContactUsesTwoPointManifold(t *testing.T) {

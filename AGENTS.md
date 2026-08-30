@@ -1,6 +1,6 @@
 # Coding Guidelines
 
-These are mandatory coding rules & guidelines for all Latticefall code.
+These are mandatory coding rules & guidelines for all code in this repository.
 
 ## Global Coding Rules
 

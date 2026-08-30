@@ -29,6 +29,7 @@ type (
 		PositionIterations           int
 		PenetrationSlop              T
 		PositionCorrection           T
+		RestitutionThreshold         T
 		EnableWarmStarting           bool
 		EnableSleeping               bool
 		SleepLinearThreshold         T
@@ -68,9 +69,9 @@ func DefaultCollisionFilter() (filter CollisionFilter) {
 // DefaultWorldConfig returns stable baseline solver settings with no gravity.
 func DefaultWorldConfig[T constraints.Float]() (config WorldConfig[T]) {
 	config = WorldConfig[T]{
-		VelocityIterations: 8, PositionIterations: 3, PenetrationSlop: 0.005, PositionCorrection: 0.2,
+		VelocityIterations: 8, PositionIterations: 3, PenetrationSlop: 0.005, PositionCorrection: 0.2, RestitutionThreshold: 0.5,
 		EnableWarmStarting: true, EnableSleeping: true, SleepLinearThreshold: 0.05, SleepAngularThreshold: 0.05, SleepTime: 0.5,
-		CCDMaxSubsteps: 32, CCDMotionThreshold: 0.25, MaxStepDelta: T(1.0 / 60.0), MinimumParallelIslandBodies: 32,
+		EnableCCD: true, CCDMaxSubsteps: 32, CCDMotionThreshold: 0.25, MaxStepDelta: T(1.0 / 60.0), MinimumParallelIslandBodies: 32,
 	}
 	return
 }

@@ -159,6 +159,21 @@ func TestShapeMassPropertiesAndCloning(t *testing.T) {
 	assert.Greater(t, first.Mass(), 0.0)
 }
 
+func TestPolyhedronUsesVolumeIntegratedInertia(t *testing.T) {
+	var shape *physics.Polyhedron3[float64] = physics.NewPolyhedron3(testCubePolyhedron(), vector.Vec3[float64]{X: 1, Y: 2, Z: 3})
+	var inertia vector.Vec3[float64] = shape.MomentOfInertia(12)
+	assert.InDelta(t, 52, inertia.X, 1e-9)
+	assert.InDelta(t, 40, inertia.Y, 1e-9)
+	assert.InDelta(t, 20, inertia.Z, 1e-9)
+}
+
+func TestPolygonUsesAreaIntegratedInertia(t *testing.T) {
+	var shape *physics.Polygon2[float64] = physics.NewPolygon2([]vector.Vec2[float64]{{X: 1, Y: 1}, {X: 5, Y: 1}, {X: 5, Y: 3}, {X: 1, Y: 3}}, 1)
+	assert.InDelta(t, 20, shape.MomentOfInertia(12), 1e-9)
+	assert.InDelta(t, -2, shape.Polygon.AABB.X1, 1e-9)
+	assert.InDelta(t, 2, shape.Polygon.AABB.X2, 1e-9)
+}
+
 func TestQuaternionRotationAndBodyOrientation(t *testing.T) {
 	var (
 		rotation physics.Quaternion[float64] = physics.QuaternionFromEuler(vector.Vec3[float64]{Z: math.Pi / 2})

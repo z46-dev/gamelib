@@ -17,6 +17,7 @@ func NewGame(sim *Simulation) (g *Game) {
 	var config physics.WorldConfig[float64] = physics.DefaultWorldConfig[float64]()
 	config.GravityY, config.EnableCCD, config.CCDMotionThreshold = 700, true, 8
 	config.PositionCorrection, config.PositionIterations, config.CCDMaxSubsteps = .8, 6, 64
+	config.PenetrationSlop, config.SleepLinearThreshold, config.SleepAngularThreshold = .1, 1, .02
 	g = &Game{World: physics.NewWorld2(config), Objects: gamelib.NewCollection[*Object](), Simulation: sim, Width: 800, Height: 500, SpawnRequests: make(chan vector.Vec2[float64], 128)}
 	g.addWalls()
 	g.addShelf()

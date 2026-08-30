@@ -10,6 +10,10 @@ import (
 )
 
 type (
+	inertiaTensorShape3[T constraints.Float] interface {
+		InertiaTensor(mass T) [9]T
+	}
+
 	// Shape3 supplies transformed bounds and mass properties for a three-dimensional body.
 	Shape3[T constraints.Float] interface {
 		GetAABB() *hshg.AABB3[T]
@@ -68,6 +72,13 @@ func (s *Sphere3[T]) MomentOfInertia(mass T) (inertia vector.Vec3[T]) {
 	return
 }
 
+// InertiaTensor returns the sphere's isotropic local inertia tensor.
+func (s *Sphere3[T]) InertiaTensor(mass T) (tensor [9]T) {
+	var inertia vector.Vec3[T] = s.MomentOfInertia(mass)
+	tensor[0], tensor[4], tensor[8] = inertia.X, inertia.Y, inertia.Z
+	return
+}
+
 // Clone returns an independent sphere collider.
 func (s *Sphere3[T]) Clone() (clone Shape3[T]) {
 	clone = &Sphere3[T]{Radius: s.Radius, Position: s.Position, aabb: s.aabb}
@@ -79,7 +90,18 @@ func NewPolyhedron3[T constraints.Float](source *poly.Polyhedron[T], scale vecto
 	if scale == (vector.Vec3[T]{}) {
 		scale = vector.Vec3[T]{X: 1, Y: 1, Z: 1}
 	}
-	shape = &Polyhedron3[T]{Polyhedron: source.Copy(), Scale: scale}
+	var local *poly.Polyhedron[T] = source.Copy()
+	local.Transform(poly.IdentityPolyhedronTransform[T]())
+	var centroid vector.Vec3[T] = local.Centroid()
+	var centered []vector.Vec3[T] = make([]vector.Vec3[T], len(local.Reference))
+	for index := range local.Reference {
+		centered[index] = vector.Vec3[T]{X: local.Reference[index].X - centroid.X, Y: local.Reference[index].Y - centroid.Y, Z: local.Reference[index].Z - centroid.Z}
+	}
+	var err error
+	if local, err = poly.NewPolyhedron(centered, local.Triangles); err != nil {
+		panic(err)
+	}
+	shape = &Polyhedron3[T]{Polyhedron: local, Scale: scale}
 	shape.Polyhedron.Transform(poly.PolyhedronTransform[T]{Scale: scale})
 	shape.volume = shape.Polyhedron.Volume()
 	shape.size = vector.Vec3[T]{X: shape.Polyhedron.AABB.X2 - shape.Polyhedron.AABB.X1, Y: shape.Polyhedron.AABB.Y2 - shape.Polyhedron.AABB.Y1, Z: shape.Polyhedron.AABB.Z2 - shape.Polyhedron.AABB.Z1}
@@ -103,9 +125,62 @@ func (p *Polyhedron3[T]) Volume() (volume T) {
 	return
 }
 
-// MomentOfInertia approximates inertia using the polyhedron's local bounding box.
+// MomentOfInertia returns the diagonal of the volume-integrated local inertia tensor.
 func (p *Polyhedron3[T]) MomentOfInertia(mass T) (inertia vector.Vec3[T]) {
-	inertia = vector.Vec3[T]{X: mass * (p.size.Y*p.size.Y + p.size.Z*p.size.Z) / 12, Y: mass * (p.size.X*p.size.X + p.size.Z*p.size.Z) / 12, Z: mass * (p.size.X*p.size.X + p.size.Y*p.size.Y) / 12}
+	var tensor [9]T = p.InertiaTensor(mass)
+	inertia = vector.Vec3[T]{X: tensor[0], Y: tensor[4], Z: tensor[8]}
+	return
+}
+
+// InertiaTensor integrates the closed triangle mesh as signed origin tetrahedra.
+func (p *Polyhedron3[T]) InertiaTensor(mass T) (tensor [9]T) {
+	var (
+		volume   T
+		centroid vector.Vec3[T]
+		second   [6]T
+	)
+	for _, triangle := range p.Polyhedron.Triangles {
+		var a, b, c vector.Vec3[T] = p.Polyhedron.Points[triangle.A], p.Polyhedron.Points[triangle.B], p.Polyhedron.Points[triangle.C]
+		var determinant T = a.X*(b.Y*c.Z-b.Z*c.Y) + a.Y*(b.Z*c.X-b.X*c.Z) + a.Z*(b.X*c.Y-b.Y*c.X)
+		var tetraVolume T = determinant / 6
+		volume += tetraVolume
+		centroid.X += (a.X + b.X + c.X) * tetraVolume / 4
+		centroid.Y += (a.Y + b.Y + c.Y) * tetraVolume / 4
+		centroid.Z += (a.Z + b.Z + c.Z) * tetraVolume / 4
+		second[0] += tetraSecondMoment3(a.X, b.X, c.X, a.X, b.X, c.X, tetraVolume)
+		second[1] += tetraSecondMoment3(a.Y, b.Y, c.Y, a.Y, b.Y, c.Y, tetraVolume)
+		second[2] += tetraSecondMoment3(a.Z, b.Z, c.Z, a.Z, b.Z, c.Z, tetraVolume)
+		second[3] += tetraSecondMoment3(a.X, b.X, c.X, a.Y, b.Y, c.Y, tetraVolume)
+		second[4] += tetraSecondMoment3(a.X, b.X, c.X, a.Z, b.Z, c.Z, tetraVolume)
+		second[5] += tetraSecondMoment3(a.Y, b.Y, c.Y, a.Z, b.Z, c.Z, tetraVolume)
+	}
+	if volume == 0 {
+		return
+	}
+	if volume < 0 {
+		volume = -volume
+		centroid.Mul(-1)
+		for index := range second {
+			second[index] = -second[index]
+		}
+	}
+	centroid.Mul(1 / volume)
+	var density T = mass / volume
+	var (
+		xx, yy, zz T = second[0] * density, second[1] * density, second[2] * density
+		xy, xz, yz T = second[3] * density, second[4] * density, second[5] * density
+	)
+	tensor[0] = yy + zz - mass*(centroid.Y*centroid.Y+centroid.Z*centroid.Z)
+	tensor[4] = xx + zz - mass*(centroid.X*centroid.X+centroid.Z*centroid.Z)
+	tensor[8] = xx + yy - mass*(centroid.X*centroid.X+centroid.Y*centroid.Y)
+	tensor[1], tensor[3] = -xy+mass*centroid.X*centroid.Y, -xy+mass*centroid.X*centroid.Y
+	tensor[2], tensor[6] = -xz+mass*centroid.X*centroid.Z, -xz+mass*centroid.X*centroid.Z
+	tensor[5], tensor[7] = -yz+mass*centroid.Y*centroid.Z, -yz+mass*centroid.Y*centroid.Z
+	return
+}
+
+func tetraSecondMoment3[T constraints.Float](ax, bx, cx, ay, by, cy, volume T) (moment T) {
+	moment = volume * (2*(ax*ay+bx*by+cx*cy) + ax*by + ay*bx + ax*cy + ay*cx + bx*cy + by*cx) / 20
 	return
 }
 

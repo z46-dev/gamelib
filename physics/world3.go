@@ -49,6 +49,7 @@ type (
 
 		mass, inverseMass       T
 		inertia, inverseInertia vector.Vec3[T]
+		inverseInertiaTensor    [9]T
 		sleepTime               T
 		islandIndex             int
 	}
@@ -63,6 +64,8 @@ type (
 		normalImpulse   T
 		tangentImpulse  vector.Vec3[T]
 		restitutionBias T
+		manifoldCount   uint8
+		feature         uint32
 	}
 
 	// World3 owns and advances a collection of three-dimensional rigid bodies.
@@ -119,6 +122,10 @@ func (w *World3[T]) AddBody(config Body3Config[T]) (body *Body3[T], err error) {
 	}
 	if config.Type > DynamicBody {
 		err = fmt.Errorf("physics: invalid Body3 type %d", config.Type)
+		return
+	}
+	if polyhedron, ok := config.Shape.(*Polyhedron3[T]); ok && config.Type == DynamicBody && !polyhedronIsConvex3(polyhedron.Polyhedron) {
+		err = fmt.Errorf("physics: dynamic Polyhedron3 must be convex; decompose concave bodies into convex parts")
 		return
 	}
 	if config.Material == (Material[T]{}) {
@@ -338,11 +345,11 @@ func (w *World3[T]) stepDiscrete(dt T) {
 
 func (w *World3[T]) ccdSubsteps(dt T) (substeps int) {
 	substeps = max(1, int(math.Ceil(float64(dt/w.Config.MaxStepDelta))))
-	if !w.Config.EnableCCD || w.Config.CCDMotionThreshold <= 0 {
+	if w.Config.CCDMotionThreshold <= 0 {
 		return
 	}
 	for _, body := range w.bodyOrder {
-		if !body.Continuous || body.Type != DynamicBody || body.Disabled {
+		if body.Type == StaticBody || body.Disabled || body.Sleeping || !w.Config.EnableCCD && !body.Continuous {
 			continue
 		}
 		var bounds *hshg.AABB3[T] = body.GetAABB()
@@ -354,14 +361,20 @@ func (w *World3[T]) ccdSubsteps(dt T) (substeps int) {
 		if limit <= 0 {
 			continue
 		}
-		var required int = int(math.Ceil(float64((body.Velocity.Length() + body.AngularVelocity.Length()*sweepRadius) * dt / limit)))
+		var (
+			linearSpeed         T = body.Velocity.Length()
+			angularSpeed        T = body.AngularVelocity.Length()
+			linearAcceleration  vector.Vec3[T]
+			angularAcceleration vector.Vec3[T]
+		)
+		if body.Type == DynamicBody {
+			linearAcceleration = vector.Vec3[T]{X: w.Config.GravityX*body.GravityScale + body.Force.X*body.inverseMass, Y: w.Config.GravityY*body.GravityScale + body.Force.Y*body.inverseMass, Z: w.Config.GravityZ*body.GravityScale + body.Force.Z*body.inverseMass}
+			angularAcceleration = body.applyInverseInertia(body.Torque)
+		}
+		var required int = int(math.Ceil(float64((linearSpeed + linearAcceleration.Length()*dt + (angularSpeed+angularAcceleration.Length()*dt)*sweepRadius) * dt / limit)))
 		if required > substeps {
 			substeps = required
 		}
-	}
-	var maximum int = max(w.Config.CCDMaxSubsteps, substeps)
-	if substeps > maximum {
-		substeps = maximum
 	}
 	return
 }
@@ -380,16 +393,16 @@ func (b *Body3[T]) recalculateMass(override T) {
 	}
 	b.inverseMass = 1 / b.mass
 	if !b.FixedRotation {
-		b.inertia = b.Shape.MomentOfInertia(b.mass)
-		if b.inertia.X > 0 {
-			b.inverseInertia.X = 1 / b.inertia.X
+		var tensor [9]T
+		if tensorShape, ok := b.Shape.(inertiaTensorShape3[T]); ok {
+			tensor = tensorShape.InertiaTensor(b.mass)
+		} else {
+			b.inertia = b.Shape.MomentOfInertia(b.mass)
+			tensor[0], tensor[4], tensor[8] = b.inertia.X, b.inertia.Y, b.inertia.Z
 		}
-		if b.inertia.Y > 0 {
-			b.inverseInertia.Y = 1 / b.inertia.Y
-		}
-		if b.inertia.Z > 0 {
-			b.inverseInertia.Z = 1 / b.inertia.Z
-		}
+		b.inertia = vector.Vec3[T]{X: tensor[0], Y: tensor[4], Z: tensor[8]}
+		b.inverseInertiaTensor = invertMatrix3(tensor)
+		b.inverseInertia = vector.Vec3[T]{X: b.inverseInertiaTensor[0], Y: b.inverseInertiaTensor[4], Z: b.inverseInertiaTensor[8]}
 	}
 }
 
@@ -439,10 +452,19 @@ func (b *Body3[T]) applyInverseInertia(value vector.Vec3[T]) (result vector.Vec3
 		return
 	}
 	result = b.Orientation.InverseRotate(value)
-	result.X *= b.inverseInertia.X
-	result.Y *= b.inverseInertia.Y
-	result.Z *= b.inverseInertia.Z
+	var local vector.Vec3[T] = result
+	result = vector.Vec3[T]{X: b.inverseInertiaTensor[0]*local.X + b.inverseInertiaTensor[1]*local.Y + b.inverseInertiaTensor[2]*local.Z, Y: b.inverseInertiaTensor[3]*local.X + b.inverseInertiaTensor[4]*local.Y + b.inverseInertiaTensor[5]*local.Z, Z: b.inverseInertiaTensor[6]*local.X + b.inverseInertiaTensor[7]*local.Y + b.inverseInertiaTensor[8]*local.Z}
 	result = b.Orientation.Rotate(result)
+	return
+}
+
+func invertMatrix3[T constraints.Float](matrix [9]T) (inverse [9]T) {
+	var determinant T = matrix[0]*(matrix[4]*matrix[8]-matrix[5]*matrix[7]) - matrix[1]*(matrix[3]*matrix[8]-matrix[5]*matrix[6]) + matrix[2]*(matrix[3]*matrix[7]-matrix[4]*matrix[6])
+	if determinant == 0 {
+		return
+	}
+	var scale T = 1 / determinant
+	inverse = [9]T{(matrix[4]*matrix[8] - matrix[5]*matrix[7]) * scale, (matrix[2]*matrix[7] - matrix[1]*matrix[8]) * scale, (matrix[1]*matrix[5] - matrix[2]*matrix[4]) * scale, (matrix[5]*matrix[6] - matrix[3]*matrix[8]) * scale, (matrix[0]*matrix[8] - matrix[2]*matrix[6]) * scale, (matrix[2]*matrix[3] - matrix[0]*matrix[5]) * scale, (matrix[3]*matrix[7] - matrix[4]*matrix[6]) * scale, (matrix[1]*matrix[6] - matrix[0]*matrix[7]) * scale, (matrix[0]*matrix[4] - matrix[1]*matrix[3]) * scale}
 	return
 }
 
@@ -465,29 +487,225 @@ func (w *World3[T]) buildContacts() {
 			if second.ID == first.ID || second.Disabled || second.Type != StaticBody && !second.Sleeping && second.ID < first.ID || first.Type != DynamicBody && second.Type != DynamicBody || !filtersCollide(first.Filter, second.Filter) {
 				continue
 			}
-			var (
-				bodyA, bodyB *Body3[T] = first, second
-				contact      Contact3[T]
-				hit          bool
-			)
+			var bodyA, bodyB *Body3[T] = first, second
 			if bodyA.ID > bodyB.ID {
 				bodyA, bodyB = bodyB, bodyA
 			}
-			contact, hit = collideBodies3(bodyA, bodyB)
-			if hit {
+			var contacts []Contact3[T] = collideBodyManifold3(bodyA, bodyB)
+			for contactIndex := range contacts {
+				var contact Contact3[T] = contacts[contactIndex]
 				if second.Sleeping {
 					second.Wake()
 				}
-				contact.pair = contactPair{first: bodyA.ID, second: bodyB.ID}
+				contact.manifoldCount = uint8(len(contacts))
 				var firstAnchor, secondAnchor vector.Vec3[T] = contactLocalAnchor3(contact.First, contact.Point), contactLocalAnchor3(contact.Second, contact.Point)
-				if cached, found := w.contactCache[contact.pair]; found && w.Config.EnableWarmStarting && cached.normal.Dot(&contact.Normal) > 0.9 && anchorsMatch3(cached, firstAnchor, secondAnchor) {
-					contact.normalImpulse, contact.tangentImpulse = cached.normalImpulse, cached.tangentImpulse
+				contact.pair = contactPair{first: bodyA.ID, second: bodyB.ID, feature: contactFeature3(contact.feature, firstAnchor, secondAnchor)}
+				var persistent bool
+				if cached, found := w.contactCache[contact.pair]; found && cached.normal.Dot(&contact.Normal) > 0.9 {
+					persistent = true
+					if w.Config.EnableWarmStarting && anchorsMatch3(cached, firstAnchor, secondAnchor) {
+						contact.normalImpulse, contact.tangentImpulse = cached.normalImpulse, cached.tangentImpulse
+					}
 				}
-				contact.restitutionBias = contactRestitutionBias3(&contact)
+				if !persistent {
+					contact.restitutionBias = contactRestitutionBias3(&contact, w.Config.RestitutionThreshold)
+				}
 				w.Contacts = append(w.Contacts, contact)
 			}
 		}
 	}
+}
+
+// collideBodyManifold3 retains every polyhedron contact needed to resist artificial pivoting.
+func collideBodyManifold3[T constraints.Float](first, second *Body3[T]) (contacts []Contact3[T]) {
+	var firstPolyhedron, firstPolyhedronOK = first.Shape.(*Polyhedron3[T])
+	var secondPolyhedron, secondPolyhedronOK = second.Shape.(*Polyhedron3[T])
+	if firstPolyhedronOK && secondPolyhedronOK {
+		if contacts = collideConvexPolyhedra3(first, second, firstPolyhedron.Polyhedron, secondPolyhedron.Polyhedron); contacts != nil {
+			return
+		}
+		var manifold poly.PolyhedronManifold[T] = poly.GetPolyhedronContactManifold(firstPolyhedron.Polyhedron, secondPolyhedron.Polyhedron)
+		for index, manifoldContact := range manifold.Contacts {
+			contacts = append(contacts, Contact3[T]{First: first, Second: second, Point: manifoldContact.Point, Normal: manifoldContact.Normal, Penetration: manifoldContact.Penetration, feature: uint32(index)})
+		}
+		return
+	}
+	var contact Contact3[T]
+	var hit bool
+	if contact, hit = collideBodies3(first, second); hit {
+		contacts = append(contacts, contact)
+	}
+	return
+}
+
+// collideConvexPolyhedra3 creates a coherent SAT manifold, returning nil for concave inputs.
+func collideConvexPolyhedra3[T constraints.Float](firstBody, secondBody *Body3[T], first, second *poly.Polyhedron[T]) (contacts []Contact3[T]) {
+	if !polyhedronIsConvex3(first) || !polyhedronIsConvex3(second) {
+		return nil
+	}
+	var (
+		normal       vector.Vec3[T]
+		penetration  T              = T(math.Inf(1))
+		firstCenter  vector.Vec3[T] = first.Centroid()
+		secondCenter vector.Vec3[T] = second.Centroid()
+	)
+	for _, source := range []*poly.Polyhedron[T]{first, second} {
+		for triangleIndex := range source.Triangles {
+			var axis vector.Vec3[T]
+			var ok bool
+			if axis, ok = source.FaceNormal(triangleIndex); !ok {
+				continue
+			}
+			if !satAxis3(first, second, axis, firstCenter, secondCenter, &normal, &penetration) {
+				return []Contact3[T]{}
+			}
+		}
+	}
+	var firstEdges [][2]vector.Vec3[T] = polyhedronEdges3(first)
+	var secondEdges [][2]vector.Vec3[T] = polyhedronEdges3(second)
+	for _, firstEdge := range firstEdges {
+		var firstDirection vector.Vec3[T] = firstEdge[1]
+		firstDirection.Sub(&firstEdge[0])
+		for _, secondEdge := range secondEdges {
+			var axis vector.Vec3[T] = secondEdge[1]
+			axis.Sub(&secondEdge[0])
+			firstAxis := firstDirection
+			firstAxis.Cross(&axis)
+			if firstAxis.SquaredLength() <= 1e-12 {
+				continue
+			}
+			firstAxis.Normalize()
+			if !satAxis3(first, second, firstAxis, firstCenter, secondCenter, &normal, &penetration) {
+				return []Contact3[T]{}
+			}
+		}
+	}
+	for index, point := range first.Points {
+		if pointInsideConvex3(point, second) {
+			contacts = append(contacts, Contact3[T]{First: firstBody, Second: secondBody, Point: point, Normal: normal, Penetration: penetration, feature: uint32(index + 1)})
+		}
+	}
+	for index, point := range second.Points {
+		if pointInsideConvex3(point, first) {
+			contacts = append(contacts, Contact3[T]{First: firstBody, Second: secondBody, Point: point, Normal: normal, Penetration: penetration, feature: uint32(index+1) | 0x80000000})
+		}
+	}
+	if len(contacts) == 0 {
+		var firstSupport, secondSupport vector.Vec3[T] = supportPoint3(first.Points, normal, true), supportPoint3(second.Points, normal, false)
+		contacts = append(contacts, Contact3[T]{First: firstBody, Second: secondBody, Point: vector.Vec3[T]{X: (firstSupport.X + secondSupport.X) / 2, Y: (firstSupport.Y + secondSupport.Y) / 2, Z: (firstSupport.Z + secondSupport.Z) / 2}, Normal: normal, Penetration: penetration, feature: 0xffffffff})
+	}
+	if len(contacts) > 4 {
+		contacts = contacts[:4]
+	}
+	return
+}
+
+func satAxis3[T constraints.Float](first, second *poly.Polyhedron[T], axis, firstCenter, secondCenter vector.Vec3[T], normal *vector.Vec3[T], penetration *T) (overlaps bool) {
+	axis.Normalize()
+	var firstMinimum, firstMaximum T = first.ProjectOnto(&axis)
+	var secondMinimum, secondMaximum T = second.ProjectOnto(&axis)
+	var overlap T = min(firstMaximum, secondMaximum) - max(firstMinimum, secondMinimum)
+	if overlap < 0 {
+		return
+	}
+	if overlap < *penetration {
+		var direction vector.Vec3[T] = secondCenter
+		direction.Sub(&firstCenter)
+		if axis.Dot(&direction) < 0 {
+			axis.Mul(-1)
+		}
+		*normal, *penetration = axis, overlap
+	}
+	overlaps = true
+	return
+}
+
+func polyhedronIsConvex3[T constraints.Float](shape *poly.Polyhedron[T]) (convex bool) {
+	var center vector.Vec3[T] = shape.Centroid()
+	for triangleIndex, triangle := range shape.Triangles {
+		var normal vector.Vec3[T]
+		var ok bool
+		if normal, ok = shape.FaceNormal(triangleIndex); !ok {
+			return
+		}
+		var outward vector.Vec3[T] = shape.Points[triangle.A]
+		outward.Sub(&center)
+		if normal.Dot(&outward) < 0 {
+			normal.Mul(-1)
+		}
+		var origin vector.Vec3[T] = shape.Points[triangle.A]
+		for _, point := range shape.Points {
+			var offset vector.Vec3[T] = point
+			offset.Sub(&origin)
+			if normal.Dot(&offset) > 1e-7 {
+				return
+			}
+		}
+	}
+	convex = true
+	return
+}
+
+func pointInsideConvex3[T constraints.Float](point vector.Vec3[T], shape *poly.Polyhedron[T]) (inside bool) {
+	var center vector.Vec3[T] = shape.Centroid()
+	for triangleIndex, triangle := range shape.Triangles {
+		var normal vector.Vec3[T]
+		var ok bool
+		if normal, ok = shape.FaceNormal(triangleIndex); !ok {
+			return
+		}
+		var outward vector.Vec3[T] = shape.Points[triangle.A]
+		outward.Sub(&center)
+		if normal.Dot(&outward) < 0 {
+			normal.Mul(-1)
+		}
+		var offset vector.Vec3[T] = point
+		offset.Sub(&shape.Points[triangle.A])
+		if normal.Dot(&offset) > 1e-7 {
+			return
+		}
+	}
+	inside = true
+	return
+}
+
+func polyhedronEdges3[T constraints.Float](shape *poly.Polyhedron[T]) (edges [][2]vector.Vec3[T]) {
+	var uses map[[2]int][]int = make(map[[2]int][]int, len(shape.Triangles)*3/2)
+	for triangleIndex, triangle := range shape.Triangles {
+		for _, edge := range [][2]int{{triangle.A, triangle.B}, {triangle.B, triangle.C}, {triangle.C, triangle.A}} {
+			if edge[0] > edge[1] {
+				edge[0], edge[1] = edge[1], edge[0]
+			}
+			uses[edge] = append(uses[edge], triangleIndex)
+		}
+	}
+	for edge, triangles := range uses {
+		if len(triangles) == 2 {
+			var firstNormal, secondNormal vector.Vec3[T]
+			var firstOK, secondOK bool
+			firstNormal, firstOK = shape.FaceNormal(triangles[0])
+			secondNormal, secondOK = shape.FaceNormal(triangles[1])
+			if firstOK && secondOK && math.Abs(float64(firstNormal.Dot(&secondNormal))) >= 1-1e-7 {
+				continue
+			}
+		}
+		edges = append(edges, [2]vector.Vec3[T]{shape.Points[edge[0]], shape.Points[edge[1]]})
+	}
+	return
+}
+
+func supportPoint3[T constraints.Float](points []vector.Vec3[T], axis vector.Vec3[T], maximum bool) (support vector.Vec3[T]) {
+	var extreme T = T(math.Inf(1))
+	if maximum {
+		extreme = T(math.Inf(-1))
+	}
+	for _, point := range points {
+		var projection T = point.Dot(&axis)
+		if maximum && projection > extreme || !maximum && projection < extreme {
+			extreme, support = projection, point
+		}
+	}
+	return
 }
 
 // storeContactCache retains solved impulses and removes contacts absent this step.
@@ -516,7 +734,7 @@ func anchorsMatch3[T constraints.Float](cached cachedContact3[T], first, second 
 }
 
 // contactRestitutionBias3 captures the desired bounce velocity before iterative solving.
-func contactRestitutionBias3[T constraints.Float](contact *Contact3[T]) (bias T) {
+func contactRestitutionBias3[T constraints.Float](contact *Contact3[T], threshold T) (bias T) {
 	var (
 		rA       vector.Vec3[T] = vector.Vec3[T]{X: contact.Point.X - contact.First.Position.X, Y: contact.Point.Y - contact.First.Position.Y, Z: contact.Point.Z - contact.First.Position.Z}
 		rB       vector.Vec3[T] = vector.Vec3[T]{X: contact.Point.X - contact.Second.Position.X, Y: contact.Point.Y - contact.Second.Position.Y, Z: contact.Point.Z - contact.Second.Position.Z}
@@ -527,8 +745,21 @@ func contactRestitutionBias3[T constraints.Float](contact *Contact3[T]) (bias T)
 	angularB.Cross(&rB)
 	var relative vector.Vec3[T] = vector.Vec3[T]{X: contact.Second.Velocity.X + angularB.X - contact.First.Velocity.X - angularA.X, Y: contact.Second.Velocity.Y + angularB.Y - contact.First.Velocity.Y - angularA.Y, Z: contact.Second.Velocity.Z + angularB.Z - contact.First.Velocity.Z - angularA.Z}
 	var velocity T = relative.Dot(&contact.Normal)
-	if velocity < -0.5 {
+	if velocity < -threshold {
 		bias = -min(contact.First.Material.Restitution, contact.Second.Material.Restitution) * velocity
+	}
+	return
+}
+
+func contactFeature3[T constraints.Float](source uint32, first, second vector.Vec3[T]) (feature uint32) {
+	if source != 0 {
+		feature = source
+		return
+	}
+	feature = 2166136261 ^ source
+	for _, value := range []T{first.X, first.Y, first.Z, second.X, second.Y, second.Z} {
+		feature ^= uint32(int32(math.Round(float64(value) * 1000)))
+		feature *= 16777619
 	}
 	return
 }
@@ -718,19 +949,32 @@ func resolvePosition3[T constraints.Float](contact *Contact3[T], config WorldCon
 	if contact.First.Sensor || contact.Second.Sensor {
 		return
 	}
-	var inverseMass T = contact.First.inverseMass + contact.Second.inverseMass
-	if inverseMass == 0 {
+	var first, second *Body3[T] = contact.First, contact.Second
+	var rA, rB vector.Vec3[T] = vector.Vec3[T]{X: contact.Point.X - first.Position.X, Y: contact.Point.Y - first.Position.Y, Z: contact.Point.Z - first.Position.Z}, vector.Vec3[T]{X: contact.Point.X - second.Position.X, Y: contact.Point.Y - second.Position.Y, Z: contact.Point.Z - second.Position.Z}
+	var rACrossNormal, rBCrossNormal vector.Vec3[T] = rA, rB
+	rACrossNormal.Cross(&contact.Normal)
+	rBCrossNormal.Cross(&contact.Normal)
+	var firstAngularResponse, secondAngularResponse vector.Vec3[T] = first.applyInverseInertia(rACrossNormal), second.applyInverseInertia(rBCrossNormal)
+	var denominator T = first.inverseMass + second.inverseMass + rACrossNormal.Dot(&firstAngularResponse) + rBCrossNormal.Dot(&secondAngularResponse)
+	if denominator == 0 {
 		return
 	}
-	var magnitude T = max(contact.Penetration-config.PenetrationSlop, 0) * config.PositionCorrection / T(config.PositionIterations) / inverseMass
-	if contact.First.Type == DynamicBody {
-		contact.First.Position.X -= contact.Normal.X * magnitude * contact.First.inverseMass
-		contact.First.Position.Y -= contact.Normal.Y * magnitude * contact.First.inverseMass
-		contact.First.Position.Z -= contact.Normal.Z * magnitude * contact.First.inverseMass
+	var magnitude T = max(contact.Penetration-config.PenetrationSlop, 0) * config.PositionCorrection / T(config.PositionIterations) / denominator
+	if contact.manifoldCount > 1 {
+		magnitude /= T(contact.manifoldCount)
 	}
-	if contact.Second.Type == DynamicBody {
-		contact.Second.Position.X += contact.Normal.X * magnitude * contact.Second.inverseMass
-		contact.Second.Position.Y += contact.Normal.Y * magnitude * contact.Second.inverseMass
-		contact.Second.Position.Z += contact.Normal.Z * magnitude * contact.Second.inverseMass
+	if first.Type == DynamicBody {
+		first.Position.X -= contact.Normal.X * magnitude * first.inverseMass
+		first.Position.Y -= contact.Normal.Y * magnitude * first.inverseMass
+		first.Position.Z -= contact.Normal.Z * magnitude * first.inverseMass
+		firstAngularResponse.Mul(-magnitude)
+		first.Orientation.ApplyRotationVector(firstAngularResponse)
+	}
+	if second.Type == DynamicBody {
+		second.Position.X += contact.Normal.X * magnitude * second.inverseMass
+		second.Position.Y += contact.Normal.Y * magnitude * second.inverseMass
+		second.Position.Z += contact.Normal.Z * magnitude * second.inverseMass
+		secondAngularResponse.Mul(magnitude)
+		second.Orientation.ApplyRotationVector(secondAngularResponse)
 	}
 }

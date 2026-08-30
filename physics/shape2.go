@@ -28,10 +28,9 @@ type (
 
 	// Polygon2 adapts a polygon mesh for use as a rigid collider.
 	Polygon2[T constraints.Float] struct {
-		Polygon       *poly.Polygon[T]
-		Scale         T
-		area          T
-		width, height T
+		Polygon *poly.Polygon[T]
+		Scale   T
+		area    T
 	}
 )
 
@@ -75,13 +74,13 @@ func (c *Circle2[T]) Clone() (clone Shape2[T]) {
 
 // NewPolygon2 creates a polygon collider from local-space vertices and uniform scale.
 func NewPolygon2[T constraints.Float](points []vector.Vec2[T], scale T) (shape *Polygon2[T]) {
+	var centroid vector.Vec2[T] = polygonCentroid(points)
 	var pointers []*vector.Vec2[T] = make([]*vector.Vec2[T], len(points))
 	for i := range points {
-		pointers[i] = vector.NewVec2(points[i].X, points[i].Y)
+		pointers[i] = vector.NewVec2(points[i].X-centroid.X, points[i].Y-centroid.Y)
 	}
 	shape = &Polygon2[T]{Polygon: poly.NewPolygon(pointers, vector.Vec2_0[T](), scale, 0), Scale: scale}
 	shape.area = polygonAbsoluteArea(shape.Polygon.Reference) * scale * scale
-	shape.width, shape.height = shape.Polygon.AABB.X2-shape.Polygon.AABB.X1, shape.Polygon.AABB.Y2-shape.Polygon.AABB.Y1
 	return
 }
 
@@ -102,9 +101,38 @@ func (p *Polygon2[T]) Area() (area T) {
 	return
 }
 
-// MomentOfInertia approximates polygon inertia from its local axis-aligned bounds.
+// MomentOfInertia integrates the polygon area about its centered local origin.
 func (p *Polygon2[T]) MomentOfInertia(mass T) (inertia T) {
-	inertia = mass * (p.width*p.width + p.height*p.height) / 12
+	var areaTwice, integral T
+	for index := range p.Polygon.Reference {
+		var next int = (index + 1) % len(p.Polygon.Reference)
+		var first, second *vector.Vec2[T] = p.Polygon.Reference[index], p.Polygon.Reference[next]
+		var cross T = first.X*second.Y - second.X*first.Y
+		areaTwice += cross
+		integral += cross * (first.X*first.X + first.X*second.X + second.X*second.X + first.Y*first.Y + first.Y*second.Y + second.Y*second.Y)
+	}
+	if areaTwice < 0 {
+		areaTwice, integral = -areaTwice, -integral
+	}
+	if areaTwice != 0 {
+		inertia = mass * integral * p.Scale * p.Scale / (6 * areaTwice)
+	}
+	return
+}
+
+func polygonCentroid[T constraints.Float](points []vector.Vec2[T]) (centroid vector.Vec2[T]) {
+	var areaTwice T
+	for index := range points {
+		var next int = (index + 1) % len(points)
+		var cross T = points[index].X*points[next].Y - points[next].X*points[index].Y
+		areaTwice += cross
+		centroid.X += (points[index].X + points[next].X) * cross
+		centroid.Y += (points[index].Y + points[next].Y) * cross
+	}
+	if areaTwice != 0 {
+		centroid.X /= 3 * areaTwice
+		centroid.Y /= 3 * areaTwice
+	}
 	return
 }
 

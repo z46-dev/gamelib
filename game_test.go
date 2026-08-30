@@ -29,6 +29,37 @@ func (g *delayedGame) Update(dt float64) {
 	}
 }
 
+func TestGameWrapperCatchUpPreservesAllElapsedTime(t *testing.T) {
+	var stalled *catchUpGame = &catchUpGame{updates: make(chan float64, 64)}
+	var wrapper *gamelib.GameWrapper = gamelib.New(stalled, 100)
+	wrapper.MaximumDelta = 0.025
+	go wrapper.Start()
+	var total float64
+	for total < 0.075 {
+		select {
+		case dt := <-stalled.updates:
+			total += dt
+		case <-time.After(time.Second):
+			require.FailNow(t, "game wrapper did not catch up")
+		}
+	}
+	wrapper.Stop()
+	assert.LessOrEqual(t, stalled.maximum, wrapper.MaximumDelta)
+	assert.GreaterOrEqual(t, total, 0.075)
+}
+
+type catchUpGame struct {
+	updates chan float64
+	maximum float64
+	once    sync.Once
+}
+
+func (g *catchUpGame) Update(dt float64) {
+	g.maximum = max(g.maximum, dt)
+	g.updates <- dt
+	g.once.Do(func() { time.Sleep(80 * time.Millisecond) })
+}
+
 func TestGameWrapperPreservesBoundedTickerDelay(t *testing.T) {
 	var game *delayedGame = &delayedGame{reached: make(chan struct{})}
 	var wrapper *gamelib.GameWrapper = gamelib.New(game, 100)

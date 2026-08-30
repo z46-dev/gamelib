@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>gamelib 3D physics example</title>
+    <style>
+        html, body, canvas {
+            width: 100%;
+            height: 100%;
+            margin: 0;
+            overflow: hidden;
+            background: #090c14;
+        }
+
+        canvas {
+            display: block;
+            cursor: grab;
+        }
+
+        canvas:active {
+            cursor: grabbing;
+        }
+
+        aside {
+            position: fixed;
+            top: 1rem;
+            left: 1rem;
+            color: #dce6ff;
+            font: 500 0.9rem/1.4 system-ui, sans-serif;
+            pointer-events: none;
+        }
+    </style>
+    <script src="./wasm_exec.js" defer></script>
+</head>
+
+<body oncontextmenu="return false;">
+    <canvas id="canvas" aria-label="Interactive three-dimensional physics simulation"></canvas>
+    <aside>WebGL2 · right-drag to orbit · left-drag an object to move it</aside>
+    <script defer>
+        document.addEventListener("DOMContentLoaded", async () => {
+            const go = new Go();
+            const result = await WebAssembly.instantiateStreaming(fetch("./main.wasm"), go.importObject);
+            await go.run(result.instance);
+        });
+    </script>
+</body>
+
+</html>

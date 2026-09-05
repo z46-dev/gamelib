@@ -18,7 +18,7 @@ func newSpatialHash3Lookup(capacity int) (lookup spatialHash3Lookup) {
 
 // hashSpatialHash3Cell mixes three signed coordinates into one probe seed.
 func hashSpatialHash3Cell(cell spatialHash3Cell) (hash uint64) {
-	hash = uint64(int64(cell.X))*0x9e3779b185ebca87 ^ uint64(int64(cell.Y))*0xc2b2ae3d27d4eb4f ^ uint64(int64(cell.Z))*0x165667b19e3779f9
+	hash = uint64(int64(cell.X))*0x9e3779b185ebca87 ^ uint64(int64(cell.Y))*0xc2b2ae3d27d4eb4f ^ uint64(int64(cell.Z))*0x165667b19e3779f9 // #nosec G115 -- signed coordinate bit patterns are intentionally mixed as unsigned hash input.
 	hash ^= hash >> 33
 	hash *= 0xff51afd7ed558ccd
 	hash ^= hash >> 33
@@ -30,7 +30,7 @@ func (l *spatialHash3Lookup) get(key spatialHash3Cell) (value uint32, found bool
 	if len(l.values) == 0 {
 		return
 	}
-	var index int = int(hashSpatialHash3Cell(key) & uint64(len(l.values)-1))
+	var index int = int(hashSpatialHash3Cell(key) & uint64(len(l.values)-1)) // #nosec G115 -- the mask bounds the result to this allocated slice.
 	for l.values[index] != 0 {
 		if l.keys[index] == key {
 			value, found = l.values[index], true
@@ -49,7 +49,7 @@ func (l *spatialHash3Lookup) set(key spatialHash3Cell, value uint32) {
 	if (l.used+1)*10 >= len(l.values)*7 {
 		l.grow()
 	}
-	var index int = int(hashSpatialHash3Cell(key) & uint64(len(l.values)-1))
+	var index int = int(hashSpatialHash3Cell(key) & uint64(len(l.values)-1)) // #nosec G115 -- the mask bounds the result to this allocated slice.
 	for l.values[index] != 0 {
 		if l.keys[index] == key {
 			l.values[index] = value
@@ -256,7 +256,7 @@ func (sh *SpatialHash3[T, U]) getBucket(levelIndex int, key spatialHash3Cell) (b
 	if rawIndex, found = level.lookup.get(key); !found {
 		var index int = len(level.buckets)
 		level.buckets = append(level.buckets, spatialHash3Bucket{generation: sh.generation})
-		level.lookup.set(key, uint32(index+1))
+		level.lookup.set(key, uint32(index+1)) // #nosec G115 -- a slice cannot approach uint32 capacity within supported process memory.
 		sh.activeBuckets[levelIndex]++
 		bucket = &level.buckets[index]
 		return
@@ -294,7 +294,7 @@ func (sh *SpatialHash3[T, U]) Insert(item T) {
 	var (
 		aabbPtr *AABB3[U] = sh.getAABB(item)
 		aabb    AABB3[U]  = *aabbPtr
-		index   uint32    = uint32(len(sh.entries))
+		index   uint32    = uint32(len(sh.entries)) // #nosec G115 -- uint32 indexes halve broad-phase reference storage; process memory bounds the slice first.
 	)
 
 	sh.entries = append(sh.entries, spatialHash3Entry[T, U]{item: item, aabb: aabb})

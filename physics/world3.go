@@ -52,6 +52,7 @@ type (
 		inverseInertiaTensor    [9]T
 		sleepTime               T
 		islandIndex             int
+		world                   *World3[T]
 	}
 
 	// Contact3 describes one active three-dimensional body contact.
@@ -64,7 +65,7 @@ type (
 		normalImpulse   T
 		tangentImpulse  vector.Vec3[T]
 		restitutionBias T
-		manifoldCount   uint8
+		manifoldCount   int
 		feature         uint32
 	}
 
@@ -77,6 +78,7 @@ type (
 		bodies                                 map[BodyID]*Body3[T]
 		bodyOrder                              []*Body3[T]
 		spatialHash                            *hshg.SpatialHash3[*Body3[T], T]
+		spatialHashDirty                       bool
 		candidates                             []*Body3[T]
 		contactCache                           map[contactPair]cachedContact3[T]
 		generation                             uint64
@@ -110,7 +112,7 @@ func NewWorld3[T constraints.Float](config WorldConfig[T]) (world *World3[T]) {
 	} else {
 		spatialHash = hshg.NewSpatialHash3[*Body3[T], T](hshg.WithSpatialHash3Config(config.SpatialHash))
 	}
-	world = &World3[T]{Config: config, nextID: 1, bodies: make(map[BodyID]*Body3[T]), spatialHash: spatialHash, contactCache: make(map[contactPair]cachedContact3[T])}
+	world = &World3[T]{Config: config, nextID: 1, bodies: make(map[BodyID]*Body3[T]), spatialHash: spatialHash, spatialHashDirty: true, contactCache: make(map[contactPair]cachedContact3[T])}
 	return
 }
 
@@ -150,10 +152,12 @@ func (w *World3[T]) AddBody(config Body3Config[T]) (body *Body3[T], err error) {
 	}
 	body.recalculateMass(config.Mass)
 	body.syncShape()
+	body.world = w
 	w.nextID++
 	w.bodies[body.ID] = body
 	w.bodyOrder = append(w.bodyOrder, body)
 	body.islandIndex = len(w.bodyOrder) - 1
+	w.spatialHashDirty = true
 	return
 }
 
@@ -163,6 +167,7 @@ func (w *World3[T]) RemoveBody(id BodyID) (removed bool) {
 		return
 	}
 	delete(w.bodies, id)
+	w.spatialHashDirty = true
 	for i := len(w.distanceConstraints) - 1; i >= 0; i-- {
 		if w.distanceConstraints[i].First.ID == id || w.distanceConstraints[i].Second.ID == id {
 			w.distanceConstraints = append(w.distanceConstraints[:i], w.distanceConstraints[i+1:]...)
@@ -200,6 +205,62 @@ func (w *World3[T]) Body(id BodyID) (body *Body3[T], found bool) {
 // Bodies returns a detached list of bodies in deterministic creation order.
 func (w *World3[T]) Bodies() (bodies []*Body3[T]) {
 	bodies = append([]*Body3[T](nil), w.bodyOrder...)
+	return
+}
+
+// BodiesInAABB returns enabled bodies whose bounds intersect the supplied bounds.
+func (w *World3[T]) BodiesInAABB(bounds *hshg.AABB3[T]) (bodies []*Body3[T]) {
+	bodies = w.BodiesInAABBInto(nil, bounds)
+	return
+}
+
+// BodiesInAABBInto replaces bodies with enabled bodies whose bounds intersect the supplied bounds.
+func (w *World3[T]) BodiesInAABBInto(bodies []*Body3[T], bounds *hshg.AABB3[T]) (result []*Body3[T]) {
+	w.ensureSpatialHash()
+	result = w.spatialHash.RetrieveInto(bodies, bounds)
+	var count int
+	for _, body := range result {
+		if !body.Disabled {
+			result[count] = body
+			count++
+		}
+	}
+	result = result[:count]
+	return
+}
+
+// BodiesInRadius returns enabled bodies whose bounds intersect a sphere around center.
+func (w *World3[T]) BodiesInRadius(center vector.Vec3[T], radius T) (bodies []*Body3[T]) {
+	bodies = w.BodiesInRadiusInto(nil, center, radius)
+	return
+}
+
+// BodiesInRadiusInto replaces bodies with enabled bodies whose bounds intersect a sphere around center.
+func (w *World3[T]) BodiesInRadiusInto(bodies []*Body3[T], center vector.Vec3[T], radius T) (result []*Body3[T]) {
+	w.ensureSpatialHash()
+	radius = max(radius, 0)
+	result = w.spatialHash.RetrieveAroundInto(bodies, center.X, center.Y, center.Z, radius)
+	var radiusSquared T = radius * radius
+	var count int
+	for _, body := range result {
+		if body.Disabled {
+			continue
+		}
+		var bounds *hshg.AABB3[T] = body.GetAABB()
+		var (
+			closestX T = min(max(center.X, bounds.X1), bounds.X2)
+			closestY T = min(max(center.Y, bounds.Y1), bounds.Y2)
+			closestZ T = min(max(center.Z, bounds.Z1), bounds.Z2)
+			deltaX   T = center.X - closestX
+			deltaY   T = center.Y - closestY
+			deltaZ   T = center.Z - closestZ
+		)
+		if deltaX*deltaX+deltaY*deltaY+deltaZ*deltaZ <= radiusSquared {
+			result[count] = body
+			count++
+		}
+	}
+	result = result[:count]
 	return
 }
 
@@ -262,6 +323,9 @@ func (b *Body3[T]) SetTransform(position vector.Vec3[T], orientation Quaternion[
 	b.Orientation.Normalize()
 	b.Wake()
 	b.syncShape()
+	if b.world != nil {
+		b.world.spatialHashDirty = true
+	}
 }
 
 // Wake returns a dynamic body to active simulation.
@@ -299,6 +363,7 @@ func (w *World3[T]) Step(dt T) {
 	for _, body := range w.bodyOrder {
 		body.Force, body.Torque = vector.Vec3[T]{}, vector.Vec3[T]{}
 	}
+	w.rebuildSpatialHash()
 }
 
 // stepDiscrete advances one collision-safe substep without clearing forces.
@@ -472,12 +537,7 @@ func invertMatrix3[T constraints.Float](matrix [9]T) (inverse [9]T) {
 func (w *World3[T]) buildContacts() {
 	w.Contacts = w.Contacts[:0]
 	w.generation++
-	w.spatialHash.Clear()
-	for _, body := range w.bodyOrder {
-		if !body.Disabled {
-			w.spatialHash.Insert(body)
-		}
-	}
+	w.rebuildSpatialHash()
 	for _, first := range w.bodyOrder {
 		if first.Disabled || first.Type == StaticBody || first.Sleeping {
 			continue
@@ -497,7 +557,7 @@ func (w *World3[T]) buildContacts() {
 				if second.Sleeping {
 					second.Wake()
 				}
-				contact.manifoldCount = uint8(len(contacts))
+				contact.manifoldCount = len(contacts)
 				var firstAnchor, secondAnchor vector.Vec3[T] = contactLocalAnchor3(contact.First, contact.Point), contactLocalAnchor3(contact.Second, contact.Point)
 				contact.pair = contactPair{first: bodyA.ID, second: bodyB.ID, feature: contactFeature3(contact.feature, firstAnchor, secondAnchor)}
 				var persistent bool
@@ -514,6 +574,24 @@ func (w *World3[T]) buildContacts() {
 			}
 		}
 	}
+}
+
+// ensureSpatialHash rebuilds the query index after structural or explicit transform changes.
+func (w *World3[T]) ensureSpatialHash() {
+	if w.spatialHashDirty {
+		w.rebuildSpatialHash()
+	}
+}
+
+// rebuildSpatialHash refreshes the broad-phase index from current body bounds.
+func (w *World3[T]) rebuildSpatialHash() {
+	w.spatialHash.Clear()
+	for _, body := range w.bodyOrder {
+		if !body.Disabled {
+			w.spatialHash.Insert(body)
+		}
+	}
+	w.spatialHashDirty = false
 }
 
 // collideBodyManifold3 retains every polyhedron contact needed to resist artificial pivoting.
@@ -758,7 +836,7 @@ func contactFeature3[T constraints.Float](source uint32, first, second vector.Ve
 	}
 	feature = 2166136261 ^ source
 	for _, value := range []T{first.X, first.Y, first.Z, second.X, second.Y, second.Z} {
-		feature ^= uint32(int32(math.Round(float64(value) * 1000)))
+		feature ^= uint32(int32(math.Round(float64(value) * 1000))) // #nosec G115 -- signed coordinate bits are intentionally folded into the FNV-style hash.
 		feature *= 16777619
 	}
 	return

@@ -55,6 +55,7 @@ type (
 		mass, inverseMass, inertia, inverseInertia T
 		sleepTime                                  T
 		islandIndex                                int
+		world                                      *World2[T]
 	}
 
 	// Contact2 describes one active two-dimensional body contact.
@@ -64,7 +65,7 @@ type (
 		Penetration   T
 
 		pair                          contactPair
-		manifoldCount                 uint8
+		manifoldCount                 int
 		normalImpulse, tangentImpulse T
 		restitutionBias               T
 	}
@@ -78,6 +79,7 @@ type (
 		bodies                                 map[BodyID]*Body2[T]
 		bodyOrder                              []*Body2[T]
 		spatialHash                            *hshg.SpatialHash2[*Body2[T], T]
+		spatialHashDirty                       bool
 		candidates                             []*Body2[T]
 		contactCache                           map[contactPair]cachedContact2[T]
 		generation                             uint64
@@ -111,7 +113,7 @@ func NewWorld2[T constraints.Float](config WorldConfig[T]) (world *World2[T]) {
 	} else {
 		spatialHash = hshg.NewSpatialHash2[*Body2[T], T](hshg.WithSpatialHash2Config(config.SpatialHash))
 	}
-	world = &World2[T]{Config: config, nextID: 1, bodies: make(map[BodyID]*Body2[T]), spatialHash: spatialHash, contactCache: make(map[contactPair]cachedContact2[T])}
+	world = &World2[T]{Config: config, nextID: 1, bodies: make(map[BodyID]*Body2[T]), spatialHash: spatialHash, spatialHashDirty: true, contactCache: make(map[contactPair]cachedContact2[T])}
 	return
 }
 
@@ -145,10 +147,12 @@ func (w *World2[T]) AddBody(config Body2Config[T]) (body *Body2[T], err error) {
 	}
 	body.recalculateMass(config.Mass)
 	body.syncShape()
+	body.world = w
 	w.nextID++
 	w.bodies[body.ID] = body
 	w.bodyOrder = append(w.bodyOrder, body)
 	body.islandIndex = len(w.bodyOrder) - 1
+	w.spatialHashDirty = true
 	return
 }
 
@@ -158,6 +162,7 @@ func (w *World2[T]) RemoveBody(id BodyID) (removed bool) {
 		return
 	}
 	delete(w.bodies, id)
+	w.spatialHashDirty = true
 	for i := len(w.distanceConstraints) - 1; i >= 0; i-- {
 		if w.distanceConstraints[i].First.ID == id || w.distanceConstraints[i].Second.ID == id {
 			w.distanceConstraints = append(w.distanceConstraints[:i], w.distanceConstraints[i+1:]...)
@@ -195,6 +200,60 @@ func (w *World2[T]) Body(id BodyID) (body *Body2[T], found bool) {
 // Bodies returns a detached list of bodies in deterministic creation order.
 func (w *World2[T]) Bodies() (bodies []*Body2[T]) {
 	bodies = append([]*Body2[T](nil), w.bodyOrder...)
+	return
+}
+
+// BodiesInAABB returns enabled bodies whose bounds intersect the supplied bounds.
+func (w *World2[T]) BodiesInAABB(bounds *hshg.AABB2[T]) (bodies []*Body2[T]) {
+	bodies = w.BodiesInAABBInto(nil, bounds)
+	return
+}
+
+// BodiesInAABBInto replaces bodies with enabled bodies whose bounds intersect the supplied bounds.
+func (w *World2[T]) BodiesInAABBInto(bodies []*Body2[T], bounds *hshg.AABB2[T]) (result []*Body2[T]) {
+	w.ensureSpatialHash()
+	result = w.spatialHash.RetrieveInto(bodies, bounds)
+	var count int
+	for _, body := range result {
+		if !body.Disabled {
+			result[count] = body
+			count++
+		}
+	}
+	result = result[:count]
+	return
+}
+
+// BodiesInRadius returns enabled bodies whose bounds intersect a circle around center.
+func (w *World2[T]) BodiesInRadius(center vector.Vec2[T], radius T) (bodies []*Body2[T]) {
+	bodies = w.BodiesInRadiusInto(nil, center, radius)
+	return
+}
+
+// BodiesInRadiusInto replaces bodies with enabled bodies whose bounds intersect a circle around center.
+func (w *World2[T]) BodiesInRadiusInto(bodies []*Body2[T], center vector.Vec2[T], radius T) (result []*Body2[T]) {
+	w.ensureSpatialHash()
+	radius = max(radius, 0)
+	result = w.spatialHash.RetrieveAroundInto(bodies, center.X, center.Y, radius)
+	var radiusSquared T = radius * radius
+	var count int
+	for _, body := range result {
+		if body.Disabled {
+			continue
+		}
+		var bounds *hshg.AABB2[T] = body.GetAABB()
+		var (
+			closestX T = min(max(center.X, bounds.X1), bounds.X2)
+			closestY T = min(max(center.Y, bounds.Y1), bounds.Y2)
+			deltaX   T = center.X - closestX
+			deltaY   T = center.Y - closestY
+		)
+		if deltaX*deltaX+deltaY*deltaY <= radiusSquared {
+			result[count] = body
+			count++
+		}
+	}
+	result = result[:count]
 	return
 }
 
@@ -249,6 +308,9 @@ func (b *Body2[T]) SetTransform(position vector.Vec2[T], rotation T) {
 	b.Position, b.Rotation = position, rotation
 	b.Wake()
 	b.syncShape()
+	if b.world != nil {
+		b.world.spatialHashDirty = true
+	}
 }
 
 // Wake returns a dynamic body to active simulation.
@@ -282,6 +344,7 @@ func (w *World2[T]) Step(dt T) {
 		body.Force = vector.Vec2[T]{}
 		body.Torque = 0
 	}
+	w.rebuildSpatialHash()
 }
 
 // stepDiscrete advances one collision-safe substep without clearing forces.
@@ -433,12 +496,7 @@ func (b *Body2[T]) syncShape() {
 func (w *World2[T]) buildContacts() {
 	w.Contacts = w.Contacts[:0]
 	w.generation++
-	w.spatialHash.Clear()
-	for _, body := range w.bodyOrder {
-		if !body.Disabled {
-			w.spatialHash.Insert(body)
-		}
-	}
+	w.rebuildSpatialHash()
 	for _, first := range w.bodyOrder {
 		if first.Disabled || first.Type == StaticBody || first.Sleeping {
 			continue
@@ -458,9 +516,9 @@ func (w *World2[T]) buildContacts() {
 			var manifold [2]Contact2[T]
 			var contactCount int
 			manifold, contactCount = collideBodyManifold2(bodyA, bodyB)
-			for contactIndex := range contactCount {
+			for contactIndex := range contactCount { // #nosec G602 -- collideBodyManifold2 returns a count bounded by the fixed manifold length.
 				contact = manifold[contactIndex]
-				contact.manifoldCount = uint8(contactCount)
+				contact.manifoldCount = contactCount
 				if second.Sleeping {
 					second.Wake()
 				}
@@ -480,6 +538,24 @@ func (w *World2[T]) buildContacts() {
 			}
 		}
 	}
+}
+
+// ensureSpatialHash rebuilds the query index after structural or explicit transform changes.
+func (w *World2[T]) ensureSpatialHash() {
+	if w.spatialHashDirty {
+		w.rebuildSpatialHash()
+	}
+}
+
+// rebuildSpatialHash refreshes the broad-phase index from current body bounds.
+func (w *World2[T]) rebuildSpatialHash() {
+	w.spatialHash.Clear()
+	for _, body := range w.bodyOrder {
+		if !body.Disabled {
+			w.spatialHash.Insert(body)
+		}
+	}
+	w.spatialHashDirty = false
 }
 
 // collideBodyManifold2 returns up to two stable contact points for a body pair.
@@ -650,7 +726,7 @@ func contactRestitutionBias2[T constraints.Float](contact *Contact2[T], threshol
 func contactFeature2[T constraints.Float](first, second vector.Vec2[T]) (feature uint32) {
 	feature = 2166136261
 	for _, value := range []T{first.X, first.Y, second.X, second.Y} {
-		feature ^= uint32(int32(math.Round(float64(value) * 1000)))
+		feature ^= uint32(int32(math.Round(float64(value) * 1000))) // #nosec G115 -- signed coordinate bits are intentionally folded into the FNV-style hash.
 		feature *= 16777619
 	}
 	return

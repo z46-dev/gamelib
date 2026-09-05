@@ -144,7 +144,7 @@ func cellCoord[T constraints.Float](v T, shift uint) (coord int) {
 
 // cellKey losslessly packs two signed 32-bit cell coordinates into one uint64. Casting a negative coordinate to uint32 preserves its bit pattern.
 func cellKey(x, y int) (key uint64) {
-	key = uint64(uint32(x))<<32 | uint64(uint32(y))
+	key = uint64(uint32(x))<<32 | uint64(uint32(y)) // #nosec G115 -- the low signed-coordinate bits form the intentionally compact hash key.
 	return
 }
 
@@ -217,7 +217,7 @@ func (sh *SpatialHash2[T, U]) getBucket(levelIndex int, key uint64) (bucket *spa
 	if rawIndex, found = level.lookup[key]; !found {
 		var index int = len(level.buckets)
 		level.buckets = append(level.buckets, spatialHash2Bucket{generation: sh.generation})
-		level.lookup[key] = uint32(index + 1)
+		level.lookup[key] = uint32(index + 1) // #nosec G115 -- a slice cannot approach uint32 capacity within supported process memory.
 		sh.activeBuckets[levelIndex]++
 		bucket = &level.buckets[index]
 		return
@@ -258,7 +258,7 @@ func (sh *SpatialHash2[T, U]) Insert(item T) {
 	var (
 		aabbPtr *AABB2[U] = sh.getAABB(item)
 		aabb    AABB2[U]  = *aabbPtr
-		index   uint32    = uint32(len(sh.entries))
+		index   uint32    = uint32(len(sh.entries)) // #nosec G115 -- uint32 indexes halve broad-phase reference storage; process memory bounds the slice first.
 	)
 
 	sh.entries = append(sh.entries, spatialHash2Entry[T, U]{item: item, aabb: aabb})
